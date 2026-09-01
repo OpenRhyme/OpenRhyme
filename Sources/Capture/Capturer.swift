@@ -101,7 +101,6 @@ public final class Capturer {
             guard now() >= nextTrustCheck else { return }
             if ax.isTrusted(prompt: false) {
                 setTrust(.active)
-                staleBackoff = 5
             } else {
                 scheduleStaleRetry()
             }
@@ -120,9 +119,9 @@ public final class Capturer {
             do {
                 context = try ax.focusedContext(of: frontmost)
                 readFailures[frontmost.pid] = nil
+                staleBackoff = 5
             } catch AXReadError.apiDisabled {
                 setTrust(.stale)
-                staleBackoff = 5
                 scheduleStaleRetry()
                 return
             } catch {
