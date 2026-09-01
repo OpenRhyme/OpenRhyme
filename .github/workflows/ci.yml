@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: Build & test (macOS 26, Xcode 26.6)
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v5
+      - name: Toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+      - name: Build
+        run: swift build -v
+      - name: Test
+        run: swift test
+
+  lint:
+    name: swift-format lint
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v5
+      - name: Lint
+        run: swift format lint --strict --recursive --parallel Sources Tests Package.swift
