@@ -8,7 +8,9 @@ struct OpenRhyme: AsyncParsableCommand {
         commandName: "openrhyme",
         abstract: "Local-first computer history for macOS: capture, store and query your activity.",
         version: "0.1.0",
-        subcommands: [EventsCommand.self, ExportCommand.self, VersionCommand.self],
+        subcommands: [
+            AppsCommand.self, EventsCommand.self, ExportCommand.self, VersionCommand.self,
+        ],
         defaultSubcommand: nil)
 
     /// ArgumentParser exits 64 (EX_USAGE) on parse/validation failures; spec §9 says 2.
