@@ -88,4 +88,29 @@ import Testing
         let store = try EventStore(url: tempURL())
         #expect(try await store.lastEventTS() == nil)
     }
+
+    @Test func afterIDPagingOrdersByIDSoNonMonotonicTSNeverSkipsRows() async throws {
+        let store = try EventStore(url: tempURL())
+        // ts values are NOT monotonic in insertion order (e.g. a backward clock
+        // correction between two appends), so ts-ordered paging would drop rows.
+        for ts in [10.0, 30.0, 20.0, 50.0, 40.0] {
+            try await store.append(event(ts, .appActivated))
+        }
+
+        var ids: [Int64] = []
+        // Start the id-ordered cursor at 0 (ids are 1-based), not nil: `afterID == nil`
+        // means "no cursor, ts-ordered" per EventQuery.afterID's contract, so a fresh
+        // id-ordered paging scan must supply an explicit starting cursor.
+        var afterID: Int64? = 0
+        while true {
+            let page = try await store.query(EventQuery(since: 0, limit: 2, afterID: afterID))
+            ids += page.compactMap(\.id)
+            guard page.count == 2, let last = page.last?.id else { break }
+            afterID = last
+        }
+        #expect(ids == [1, 2, 3, 4, 5])
+
+        let rows = try await store.query(EventQuery(since: 0))
+        #expect(rows.map(\.id) == [1, 3, 2, 5, 4])
+    }
 }

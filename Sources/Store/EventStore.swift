@@ -13,6 +13,9 @@ public struct EventQuery: Sendable, Equatable {
     public var kinds: [EventKind]?
     public var bundleID: String?
     public var limit: Int
+    /// Cursor for id-ordered paging: when set, results are ordered by `id`
+    /// (insertion order) so `id > afterID` never skips rows; without it,
+    /// results are ordered by `ts, id`.
     public var afterID: Int64?
 
     public init(
@@ -113,7 +116,7 @@ public actor EventStore {
             sql += " AND id > ?"
             binds.append(.int(afterID))
         }
-        sql += " ORDER BY ts, id LIMIT ?"
+        sql += query.afterID != nil ? " ORDER BY id LIMIT ?" : " ORDER BY ts, id LIMIT ?"
         let limit = min(max(query.limit, 1), EventQuery.maxLimit)
         binds.append(.int(Int64(limit)))
 
