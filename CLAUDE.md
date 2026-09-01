@@ -2,7 +2,7 @@
 
 ## What this is
 
-Open-source, local-first "Computer History" for macOS: a Swift daemon captures activity via the Accessibility API plus a listen-only event tap, stores it in tiered SQLite, compacts it deterministically, and a separate Python MCP server (sibling repo in the OpenRhyme GitHub org) exposes it to agents. Full reasoning lives in `docs/computer-history-spec.md` — read it before any design work.
+Open-source, local-first "Computer History" for macOS: a Swift daemon captures activity via the Accessibility API plus a listen-only event tap, stores it in tiered SQLite, compacts it deterministically, and a separate Python MCP server ([OpenRhyme/openrhyme-mcp](https://github.com/OpenRhyme/openrhyme-mcp), locally `../openrhyme-mcp`) exposes it to agents. Full reasoning lives in `docs/computer-history-spec.md` — read it before any design work.
 
 ## State (2026-09-01)
 

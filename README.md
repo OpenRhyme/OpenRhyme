@@ -27,7 +27,7 @@ OpenRhyme is the same capability with the ownership flipped:
  └───────────────────────────────────┬────────────────────────────────────────┘
                                      │  SQLite read-only  +  `openrhyme … --json`
                                      ▼
-                    openrhyme-mcp  (Python, sibling repo in github.com/OpenRhyme — planned)
+                    openrhyme-mcp  (Python, github.com/OpenRhyme/openrhyme-mcp)
                     thin MCP server over stdio, usable by any agent
 ```
 
@@ -69,7 +69,7 @@ Running the daemon locally needs two grants — **Accessibility** and **Input Mo
 From spec §9:
 
 1. First slice — capture daemon alone, or capture + MCP so an agent can query it on day one?
-2. ~~Daemon language~~ → **Swift** (decided 2026-09-01). MCP server → **Python**, sibling repo in the [OpenRhyme org](https://github.com/OpenRhyme).
+2. ~~Daemon language~~ → **Swift** (decided 2026-09-01). MCP server → **Python**, [OpenRhyme/openrhyme-mcp](https://github.com/OpenRhyme/openrhyme-mcp).
 3. Sessionization signals — app switch? idle threshold? file/project change? a scored combination?
 4. Per-app allowlist UX.
 5. Retention defaults and cold-tier TTL.

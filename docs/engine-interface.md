@@ -1,6 +1,6 @@
 # Engine interface: how the Python MCP server drives the Swift engine
 
-Status: research notes, 2026-09-01. Nothing here is implemented. This answers two questions that came up while scoping the split into an "engine" repo (this one, `OpenRhyme/OpenRhyme`, Swift) and an "MCP" repo (Python, also under the `OpenRhyme` org): *how does Python call a Swift program at all*, and *what should the boundary look like*.
+Status: research notes, 2026-09-01. Nothing here is implemented. This answers two questions that came up while scoping the split into an "engine" repo (this one, `OpenRhyme/OpenRhyme`, Swift) and an "MCP" repo (Python, `OpenRhyme/openrhyme-mcp`): *how does Python call a Swift program at all*, and *what should the boundary look like*.
 
 ## 1. Three processes, not two
 
