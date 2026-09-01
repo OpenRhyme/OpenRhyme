@@ -52,6 +52,18 @@ import Testing
         #expect(EventQuery(since: 0, limit: 0).limit == 1)
     }
 
+    @Test func queryReClampsLimitMutatedAfterInit() async throws {
+        let store = try EventStore(url: tempURL())
+        for i in 1...3 {
+            try await store.append(event(Double(i), .appActivated))
+        }
+        var q = EventQuery(since: 0)
+        q.limit = 999_999
+        #expect(try await store.query(q).count == 3)
+        q.limit = 0
+        #expect(try await store.query(q).count == 1)
+    }
+
     @Test func readOnlyStoreCannotAppendButCanQuery() async throws {
         let url = tempURL()
         do {

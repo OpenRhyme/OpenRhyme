@@ -114,7 +114,8 @@ public actor EventStore {
             binds.append(.int(afterID))
         }
         sql += " ORDER BY ts, id LIMIT ?"
-        binds.append(.int(Int64(query.limit)))
+        let limit = min(max(query.limit, 1), EventQuery.maxLimit)
+        binds.append(.int(Int64(limit)))
 
         let statement = try db.prepare(sql).bind(binds)
         var rows: [RawEvent] = []
