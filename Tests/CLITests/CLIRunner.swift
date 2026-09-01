@@ -1,5 +1,21 @@
 import Foundation
 
+/// Thread-safe box used to hand stderr bytes back from the background drain queue.
+private final class DataBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage = Data()
+    func set(_ data: Data) {
+        lock.lock()
+        storage = data
+        lock.unlock()
+    }
+    func get() -> Data {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage
+    }
+}
+
 /// Runs the built `openrhyme` binary. `swift test` builds it next to the test bundle.
 enum CLIRunner {
     static var binaryURL: URL {
@@ -33,8 +49,18 @@ enum CLIRunner {
             input.fileHandleForWriting.closeFile()
         }
         try process.run()
+
+        // Drain stderr on a background queue while stdout drains on this thread, so a
+        // command that writes more than the pipe buffer to one stream while the other is
+        // still filling can't deadlock the child and the parent against each other.
+        let errBox = DataBox()
+        let errHandle = err.fileHandleForReading
+        let group = DispatchGroup()
+        DispatchQueue.global().async(group: group) { errBox.set(errHandle.readDataToEndOfFile()) }
         let stdout = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-        let stderr = String(decoding: err.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        group.wait()
+        let stderr = String(decoding: errBox.get(), as: UTF8.self)
+
         process.waitUntilExit()
         return (stdout, stderr, process.terminationStatus)
     }

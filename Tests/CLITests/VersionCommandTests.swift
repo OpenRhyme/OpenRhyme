@@ -21,6 +21,12 @@ import Testing
 
     @Test func unknownCommandExitsWithUsageCode() throws {
         let result = try CLIRunner.run(["bogus"])
-        #expect(result.status == 64 || result.status == 2)
+        #expect(result.status == 2)
+    }
+
+    @Test func helpExitsZeroWithUsageText() throws {
+        let result = try CLIRunner.run(["--help"])
+        #expect(result.status == 0)
+        #expect(result.stdout.contains("USAGE") || result.stdout.contains("OVERVIEW"))
     }
 }
