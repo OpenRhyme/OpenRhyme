@@ -6,7 +6,7 @@ Open-source, local-first "Computer History" for macOS: a Swift daemon captures a
 
 ## State (2026-09-01)
 
-Workspace scaffolded, no implementation yet. Every `Sources/*/*.swift` file is a comment-only stub describing that module's responsibility. Decisions made after the spec: Swift for the engine; MCP in Python in a separate repo; MIT license.
+Workspace scaffolded, no implementation yet. Every `Sources/*/*.swift` file is a comment-only stub. **The MVP design is approved: `docs/superpowers/specs/2026-09-01-mvp-capture-engine-design.md`** — read it before implementing anything; implementation plans live in `docs/superpowers/plans/`. Decisions made after the original spec: Swift engine, own AX layer (AXorcist as reference only), MCP in Python in a separate repo, MIT, **no storage tiers in the MVP** (one `events` table).
 
 ## Non-negotiables
 

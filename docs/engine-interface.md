@@ -70,14 +70,13 @@ openrhyme version  --json            {"engine": "0.1.0", "schema": 1}
 ### 3.3 Store location and files
 
 ```
-~/Library/Application Support/OpenRhyme/
-  hot.sqlite        raw events, WAL mode, ~1 day
-  warm.sqlite       sessions + summaries, FTS5 virtual tables
-  cold/             archived raw-event files, auto-cleaned by TTL
-  config.json       allowlist, retention, feature flags
+~/Library/Application Support/OpenRhyme/     (override: $OPENRHYME_DATA_DIR)
+  events.sqlite     MVP: one table of raw events, WAL mode (schema in the MVP spec §7)
+  config.json       allowlist, capture settings
+  daemon.pid
 ```
 
-Python opens `warm.sqlite` (and `hot.sqlite` for "what am I doing right now") with `sqlite3.connect("file:…?mode=ro", uri=True)`. WAL mode makes concurrent reader + single writer safe without coordination.
+Tiers (`hot`/`warm`/`cold`) are deferred past the MVP; when they arrive they will be additional files here, and `events.sqlite` becomes the hot tier. Python opens the database with `sqlite3.connect("file:…?mode=ro", uri=True)`. WAL mode makes concurrent reader + single writer safe without coordination.
 
 ### 3.4 What is public and what is not
 
