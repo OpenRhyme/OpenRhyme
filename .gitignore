@@ -71,3 +71,6 @@ DerivedData/
 .env
 .env.*
 .DS_Store
+
+# Claude Code worktrees
+.claude/worktrees/
