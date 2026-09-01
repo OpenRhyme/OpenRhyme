@@ -250,12 +250,13 @@ Built with swift-argument-parser. Every command accepts `--json`; `--json` outpu
 Envelope: `{"ok": true, "data": …}` or `{"ok": false, "error": {"code": "<stable_snake_case>", "message": "…", "hint": "…"}}`. Exit codes: `0` ok · `1` failure · `2` usage · `3` not trusted · `4` daemon not running (only where it matters) · `5` schema too new.
 
 ## 10. Daemon runtime
-1. Resolve paths, load config, open store, `Schema.migrate`.
-2. Write `daemon.pid`; refuse to start if the pidfile names a live process.
-3. Trust check (§6.8); emit `daemon.started`.
-4. Start `AppLifecycle`, create observers for running allowlisted apps, start heartbeat timer and idle monitor, run `RunLoop.main`.
-5. `SIGINT`/`SIGTERM`: flush debounced values, emit `daemon.stopped`, close the store, remove the pidfile, exit 0.
-6. Logging: `os.Logger(subsystem: "org.openrhyme.engine")` plus a compact stderr line per lifecycle event; `--verbose` adds per-event lines.
+1. Install the SIGINT/SIGTERM handler first (so a signal during startup is latched, not lost), resolve paths, ensure the data dir, load config.
+2. Write `daemon.pid`; refuse to start (`daemon_already_running`, exit 1) if the pidfile names a live process — before opening the store, so a duplicate daemon never touches the running daemon's database.
+3. Open the store, `Schema.migrate`.
+4. Trust check (§6.8); emit `daemon.started` (`extra.version`, `extra.schema`, `extra.allowlist`).
+5. Attach the store consumer to the capture `AsyncStream`, then start capture (heartbeat + idle; observers arrive in Part 2), and await the signal.
+6. `SIGINT`/`SIGTERM`: stop capture, drain the consumer, emit `daemon.stopped`, close the store, remove the pidfile (`defer`), exit 0.
+7. Logging: `os.Logger(subsystem: "org.openrhyme.engine")` plus a compact stderr line per lifecycle event; `--verbose` adds per-event lines.
 
 ## 11. Testing
 - `Core`: `RawEvent` JSON round-trip; `TimeSpec` parsing table; `Config` defaults, unknown-key preservation.
