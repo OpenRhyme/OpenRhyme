@@ -12,24 +12,31 @@ public struct RedactedText: Sendable, Equatable {
     }
 }
 
-/// Spec §6.5: secure fields expose nothing; values are capped at a UTF-8 boundary.
+/// Spec §6.5: secure fields expose nothing; `value` and `selectedText` are both capped at a
+/// UTF-8 boundary.
 public enum Redaction {
     public static func apply(_ element: ElementInfo?, maxValueBytes: Int) -> RedactedText {
         guard let element, !element.isSecure else {
             return RedactedText(value: nil, selectedText: nil, truncated: false, length: 0)
         }
-        guard let value = element.value else {
-            return RedactedText(
-                value: nil, selectedText: element.selectedText, truncated: false, length: 0)
+
+        let length = element.value?.utf8.count ?? 0
+        var truncated = false
+
+        var value = element.value
+        if let text = value, text.utf8.count > maxValueBytes {
+            value = truncate(text, toBytes: maxValueBytes)
+            truncated = true
         }
-        let length = value.utf8.count
-        guard length > maxValueBytes else {
-            return RedactedText(
-                value: value, selectedText: element.selectedText, truncated: false, length: length)
+
+        var selectedText = element.selectedText
+        if let text = selectedText, text.utf8.count > maxValueBytes {
+            selectedText = truncate(text, toBytes: maxValueBytes)
+            truncated = true
         }
+
         return RedactedText(
-            value: truncate(value, toBytes: maxValueBytes), selectedText: element.selectedText,
-            truncated: true, length: length)
+            value: value, selectedText: selectedText, truncated: truncated, length: length)
     }
 
     /// Longest prefix of `text` that is at most `bytes` long and ends on a scalar boundary.
