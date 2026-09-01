@@ -75,6 +75,24 @@ import Testing
         #expect(second.events[0].extra?["length"] == 2)
     }
 
+    @Test func appSwitchWithMatchingEmptyValueIsNotTreatedAsUnchanged() {
+        let element = ElementInfo(role: "AXTextArea", value: "")
+        let first = HeartbeatDiff.compute(
+            previous: LastKnownState(), input: input(safari, element: element))
+        let second = HeartbeatDiff.compute(
+            previous: first.state, input: input(textEdit, element: element))
+        #expect(second.events.map(\.kind) == [.appDeactivated, .appActivated, .contextSnapshot])
+        #expect(second.events[2].value == "")
+        #expect(second.events[2].extra?["valueUnchanged"] == nil)
+
+        let third = HeartbeatDiff.compute(
+            previous: second.state,
+            input: input(textEdit, window: WindowInfo(title: "a.md"), element: element))
+        #expect(third.events.map(\.kind) == [.contextSnapshot])
+        #expect(third.events[0].value == nil)
+        #expect(third.events[0].extra?["valueUnchanged"] == true)
+    }
+
     @Test func switchingBetweenAllowedAppsDeactivatesAndActivates() {
         let first = HeartbeatDiff.compute(previous: LastKnownState(), input: input(safari))
         let second = HeartbeatDiff.compute(previous: first.state, input: input(textEdit))

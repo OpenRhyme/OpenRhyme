@@ -93,8 +93,8 @@ public enum HeartbeatDiff {
             elementTitle: context.element?.title, selectedText: redacted.selectedText,
             valueHash: hash)
 
-        if appChanged || signature != previous.signature {
-            let valueUnchanged = hash != nil && hash == previous.signature?.valueHash
+        if appChanged || signature != state.signature {
+            let valueUnchanged = hash != nil && hash == state.signature?.valueHash
             var extra: [String: JSONValue] = ["reason": "heartbeat"]
             if let hash {
                 extra["valueHash"] = .string(hash)
