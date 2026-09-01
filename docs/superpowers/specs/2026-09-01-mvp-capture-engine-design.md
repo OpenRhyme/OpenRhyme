@@ -96,7 +96,7 @@ public struct RawEvent: Codable, Sendable, Equatable {
 | `daemon.started` / `daemon.stopped` | process start/stop | — | `version`, `schema`, `allowlist` |
 | `permission.changed` | trust state transition | — | `trusted: Bool`, `state: "needsPermission"\|"active"\|"stale"` |
 | `app.launched` / `app.terminated` | `NSWorkspace` for allowlisted apps | `pid`, `bundleID`, `appName` | — |
-| `app.activated` / `app.deactivated` | frontmost app changes, for **allowlisted apps only**. Leaving to a non-allowlisted app is visible only as `app.deactivated` of the allowlisted one. With `capture.record_other_apps = true` (default `false`) other apps also emit `app.activated` with `bundleID`/`appName` and nothing else | `pid`, `bundleID`, `appName` | `allowlisted: Bool` |
+| `app.activated` / `app.deactivated` | frontmost app changes, for **allowlisted apps only**. Leaving to a non-allowlisted app is visible only as `app.deactivated` of the allowlisted one. With `capture.record_other_apps = true` (default `false`) other apps also emit `app.activated` carrying `pid`, `bundleID`, `appName` and nothing else (no window/element content) | `pid`, `bundleID`, `appName` | `allowlisted: Bool` |
 | `app.ax_enabled` | Electron enabling attempted | `pid`, `bundleID` | `method: "AXManualAccessibility"\|"AXEnhancedUserInterface"`, `result: "ok"\|"unsupported"\|"failed"` |
 | `app.opaque` | app marked opaque after N failures | `pid`, `bundleID` | `failures`, `lastError` |
 | `window.focused` | focused window changed | app fields, `windowTitle`, `document`, `url` | `windowID` if available |
@@ -198,7 +198,7 @@ Column names are the JSON field names in exports and in the MCP server. `PRAGMA 
 
 ### 7.2 Access
 - `Database`: open (create dir, set pragmas), `exec`, prepared-statement bind/step/column helpers, error type wrapping `sqlite3_errmsg`. `Schema.migrate(db)` applies v1 and records the version; a database with a **newer** version than the binary understands is refused with a clear error.
-- `EventStore` (actor): `append(_ event: RawEvent) async throws -> Int64`, `query(since:until:kinds:bundleID:limit:) -> [RawEvent]` (ordered by `ts, id`, `limit` capped at 10 000), `count()`, `lastEventTS()`, `export(...) -> AsyncStream<String>` of JSONL lines.
+- `EventStore` (actor): `append(_ event: RawEvent) async throws -> Int64`, `query(since:until:kinds:bundleID:limit:) -> [RawEvent]` (ordered by `ts, id`, `limit` capped at 10 000), `count()`, `lastEventTS()`. JSONL export is CLI-side: `openrhyme export` pages `query` by an `id` cursor (`EventQuery.afterID`, starting at 0) so results are insertion-ordered and no row is skipped when `ts` is non-monotonic — `query` orders by `id` whenever `afterID` is set, by `ts, id` otherwise.
 - Writes: one `INSERT` per event inside an implicit transaction; WAL makes this cheap at MVP volumes (tens of events per minute).
 - Readers use `SQLITE_OPEN_READONLY`.
 
@@ -236,9 +236,9 @@ Built with swift-argument-parser. Every command accepts `--json`; `--json` outpu
 | Command | Behaviour |
 |---|---|
 | `openrhyme daemon` | §10 |
-| `openrhyme status --json` | `{trusted, state, daemonRunning, pid, dataDir, dbPath, eventCount, lastEventTS, allowlist, opaqueApps}` |
+| `openrhyme status --json` | `{trusted, state, daemon_running, pid, data_dir, db_path, event_count, last_event_ts, allowlist, opaque_apps}` (JSON keys are snake_case, matching the column-name convention and the MCP server that consumes this `data` object verbatim; `pid`/`last_event_ts` are omitted, not null, when absent) |
 | `openrhyme apps list --json` | allowlist |
-| `openrhyme apps running --json` | running apps: `bundleID`, `name`, `pid`, `allowlisted`, `isElectron` — to help pick |
+| `openrhyme apps running --json` | running apps: `bundle_id`, `name`, `pid`, `allowlisted`, `is_electron` (snake_case) — to help pick |
 | `openrhyme apps allow <bundle-id>` / `deny <bundle-id>` | edits `config.json`; idempotent |
 | `openrhyme inspect --json` | focused app/window/element: the §6.4 bundle **plus** `AXUIElementCopyAttributeNames` and, with `--depth N`, a bounded child subtree. Developer tool; requires trust |
 | `openrhyme events --since <time> [--until <time>] [--kind k]... [--app bundle] [--limit n] --json` | `{ok, data: {events: [...], count}}` |
