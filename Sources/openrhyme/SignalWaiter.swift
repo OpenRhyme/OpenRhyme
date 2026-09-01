@@ -7,6 +7,10 @@ import Foundation
 final class SignalWaiter {
     private var sources: [DispatchSourceSignal] = []
     private var continuation: CheckedContinuation<Int32, Never>?
+    /// A signal that arrived before `wait()` was reached. `signal(sig, SIG_IGN)` in `init` has
+    /// already disabled the default terminate action, so without this latch the signal would be
+    /// dropped and the daemon would wait forever for a second one.
+    private var pending: Int32?
 
     init(signals: [Int32]) {
         for sig in signals {
@@ -21,12 +25,20 @@ final class SignalWaiter {
     }
 
     private func fire(_ sig: Int32) {
-        continuation?.resume(returning: sig)
-        continuation = nil
+        guard let continuation else {
+            pending = sig
+            return
+        }
+        self.continuation = nil
+        continuation.resume(returning: sig)
     }
 
     func wait() async -> Int32 {
-        await withCheckedContinuation { continuation in
+        if let pending {
+            self.pending = nil
+            return pending
+        }
+        return await withCheckedContinuation { continuation in
             self.continuation = continuation
         }
     }

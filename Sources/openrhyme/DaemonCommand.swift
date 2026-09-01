@@ -27,6 +27,9 @@ struct DaemonCommand: AsyncParsableCommand {
     /// Everything that touches AX lives on the main actor; the store is an actor of its own.
     @MainActor
     private func runDaemon() async throws {
+        // Installed first so a signal arriving during startup is latched, not lost to the
+        // default terminate action.
+        let waiter = SignalWaiter(signals: [SIGINT, SIGTERM])
         let logger = Logger(subsystem: "org.openrhyme.engine", category: "daemon")
         let paths = Paths.resolve()
         try paths.ensureDataDir()
@@ -50,7 +53,6 @@ struct DaemonCommand: AsyncParsableCommand {
             )
         }
         let capturer = Capturer(ax: client, paths: paths, config: config)
-        let waiter = SignalWaiter(signals: [SIGINT, SIGTERM])
 
         try await store.append(
             RawEvent(

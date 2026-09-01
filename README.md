@@ -2,7 +2,7 @@
 
 An open-source, local-first **computer history layer for macOS** — a daemon that turns what you do on your Mac into a private, searchable timeline that *any* AI agent can read.
 
-> **Status:** pre-implementation. The design is settled ([spec](docs/computer-history-spec.md)), the workspace is scaffolded, and no capture code exists yet.
+> **Status:** Part 1 of the MVP is implemented on this branch — the capture daemon and the `openrhyme` CLI, against the settled design ([spec](docs/computer-history-spec.md)). The MCP server and the WARM/COLD storage tiers are still ahead.
 
 ## Why
 
@@ -45,7 +45,7 @@ Key design choices (reasoning in the spec):
 | `Sources/Capture` | Accessibility + input-activity capture (macOS only) |
 | `Sources/Store` | SQLite tiers; the schema is the contract other processes read |
 | `Sources/Compact` | Inference-free sessionization / dedup / idle dropping |
-| `Sources/openrhyme` | The executable: `daemon`, `status`, `apps`, `compact`, `inspect`, `version` |
+| `Sources/openrhyme` | The executable: `daemon`, `status`, `apps`, `inspect`, `events`, `export`, `version` |
 | `Tests/*` | One test target per module |
 | `docs/computer-history-spec.md` | The research & design spec — read this first |
 | `docs/accessibility-api.md` | The macOS Accessibility API from a capture daemon's point of view |
@@ -75,7 +75,7 @@ make run                                     # starts the daemon in the foregrou
 .build/debug/openrhyme export --since 1d --out today.jsonl
 ```
 
-The daemon needs the **Accessibility** grant. When launched from a terminal, macOS attributes the request to the terminal app, so grant it to Terminal/iTerm (System Settings → Privacy & Security → Accessibility). `openrhyme inspect` shows exactly what the daemon can see for the frontmost app.
+The daemon needs the **Accessibility** grant. When launched from a terminal, macOS attributes the request to the terminal app, so grant it to Terminal/iTerm (System Settings → Privacy & Security → Accessibility). `openrhyme inspect` shows exactly what the daemon can see for the frontmost app. Ad-hoc-signed `swift build` binaries lose the grant on every rebuild — read `docs/accessibility-api.md` §2 before trying.
 
 ## Roadmap and open questions
 
