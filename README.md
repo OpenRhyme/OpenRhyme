@@ -62,7 +62,20 @@ make lint      # swift format lint --strict
 make format    # swift format --in-place
 ```
 
-Running the daemon locally needs two grants — **Accessibility** and **Input Monitoring** — and ad-hoc-signed builds lose them on every rebuild. Read `docs/accessibility-api.md` §2 before trying.
+## Running the MVP
+
+```sh
+make build
+.build/debug/openrhyme apps running          # find bundle identifiers
+.build/debug/openrhyme apps allow com.apple.TextEdit
+make run                                     # starts the daemon in the foreground
+# in another terminal, after a while:
+.build/debug/openrhyme status
+.build/debug/openrhyme events --since 10m
+.build/debug/openrhyme export --since 1d --out today.jsonl
+```
+
+The daemon needs the **Accessibility** grant. When launched from a terminal, macOS attributes the request to the terminal app, so grant it to Terminal/iTerm (System Settings → Privacy & Security → Accessibility). `openrhyme inspect` shows exactly what the daemon can see for the frontmost app.
 
 ## Roadmap and open questions
 

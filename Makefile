@@ -1,4 +1,4 @@
-.PHONY: build test format lint clean
+.PHONY: build test run format lint clean
 
 SOURCES := Sources Tests Package.swift
 
@@ -7,6 +7,9 @@ build:
 
 test:
 	swift test
+
+run:
+	swift build && .build/debug/openrhyme daemon --verbose
 
 format:
 	swift format --in-place --recursive --parallel $(SOURCES)
