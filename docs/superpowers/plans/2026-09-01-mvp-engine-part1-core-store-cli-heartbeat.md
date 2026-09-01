@@ -61,8 +61,8 @@
 **Files:**
 - Modify: `Package.swift`
 - Create: `Sources/Core/JSONValue.swift`
-- Create: `Tests/CoreTests/JSONValueTests.swift`
-- Delete: `Tests/CaptureTests/CaptureTests.swift`, `Tests/StoreTests/StoreTests.swift` (comment-only stubs; real tests replace them in later tasks — keep `Tests/CompactTests/CompactTests.swift`)
+- Create: `Tests/CoreTests/JSONValueTests.swift`, `Tests/CLITests/CLITests.swift` (placeholder so the new test target has a source file; Task 10 replaces it)
+- Keep the comment-only stubs `Tests/StoreTests/StoreTests.swift` and `Tests/CaptureTests/CaptureTests.swift` for now — a test target with no source files does not build; Tasks 6 and 13 delete them when they add the first real tests
 
 **Interfaces:**
 - Produces: `public enum JSONValue: Codable, Equatable, Hashable, Sendable` with cases `.string(String)`, `.number(Double)`, `.bool(Bool)`, `.null`, `.array([JSONValue])`, `.object([String: JSONValue])`; literal conformances; accessors `stringValue`, `doubleValue`, `boolValue`, `arrayValue`, `objectValue`.
@@ -117,11 +117,11 @@ let package = Package(
 )
 ```
 
-- [ ] **Step 2: Create the Core target directory with a placeholder so the package resolves, delete the stub tests, and write the failing test**
+- [ ] **Step 2: Create the new directories, the CLITests placeholder, and the failing test**
 
 ```bash
 mkdir -p Sources/Core Tests/CoreTests Tests/CLITests
-git rm -q Tests/CaptureTests/CaptureTests.swift Tests/StoreTests/StoreTests.swift
+printf '// CLI end-to-end tests are added in Task 10.\n' > Tests/CLITests/CLITests.swift
 ```
 
 `Tests/CoreTests/JSONValueTests.swift`:
@@ -267,7 +267,7 @@ extension JSONValue: ExpressibleByStringLiteral, ExpressibleByIntegerLiteral,
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `swift test --filter JSONValueTests`
-Expected: 3 tests pass. Also run `swift build` — every target (including the new empty `CLITests`, which needs at least one file) must compile. If `CLITests` fails for having no sources, create `Tests/CLITests/CLITests.swift` containing only `// CLI end-to-end tests are added in Task 10.` — Task 10 replaces it.
+Expected: 3 tests pass. Also run `swift build` — every target must compile.
 
 - [ ] **Step 6: Format and commit**
 
@@ -1018,7 +1018,7 @@ git commit -m "Add Config with unknown-key preservation"
 
 **Files:**
 - Create: `Sources/Store/Database.swift`
-- Delete: `Sources/Store/Store.swift` (stub) — replace its module comment at the top of `Database.swift`
+- Delete: `Sources/Store/Store.swift` (stub) — replace its module comment at the top of `Database.swift`; `Tests/StoreTests/StoreTests.swift` (comment-only stub, superseded by the real test file)
 - Test: `Tests/StoreTests/DatabaseTests.swift`
 
 **Interfaces:**
@@ -1104,7 +1104,7 @@ Expected: build error — `Database` not found.
 - [ ] **Step 3: Implement**
 
 ```bash
-git rm -q Sources/Store/Store.swift
+git rm -q Sources/Store/Store.swift Tests/StoreTests/StoreTests.swift
 ```
 
 `Sources/Store/Database.swift`:
@@ -2534,7 +2534,7 @@ git commit -m "Add apps list/allow/deny commands"
 
 **Files:**
 - Create: `Sources/Core/Hashing.swift`, `Sources/Capture/AXTypes.swift`, `Sources/Capture/Redaction.swift`
-- Delete: `Sources/Capture/Capture.swift` (stub) — its module comment moves to the top of `AXTypes.swift`
+- Delete: `Sources/Capture/Capture.swift` (stub) — its module comment moves to the top of `AXTypes.swift`; `Tests/CaptureTests/CaptureTests.swift` (comment-only stub, superseded by the real test files)
 - Test: `Tests/CaptureTests/FakeAXClient.swift` (test support, no `@Test`), `Tests/CaptureTests/RedactionTests.swift`, `Tests/CoreTests/HashingTests.swift`
 
 **Interfaces:**
@@ -2672,7 +2672,7 @@ Expected: build errors — types not found.
 - [ ] **Step 3: Implement**
 
 ```bash
-git rm -q Sources/Capture/Capture.swift
+git rm -q Sources/Capture/Capture.swift Tests/CaptureTests/CaptureTests.swift
 ```
 
 `Sources/Core/Hashing.swift`:
