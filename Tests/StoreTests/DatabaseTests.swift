@@ -62,4 +62,16 @@ import Testing
         let url = tempDB()
         #expect(throws: DatabaseError.self) { try Database(url: url, mode: .readOnly) }
     }
+
+    @Test func callsAfterCloseFailInsteadOfCrashing() throws {
+        let url = tempDB()
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let db = try Database(url: url, mode: .readWrite)
+        db.close()
+        #expect(throws: DatabaseError.self) { try db.exec("SELECT 1") }
+        #expect(throws: DatabaseError.self) { try db.prepare("SELECT 1") }
+        #expect(db.lastInsertRowID == 0)
+        db.close()
+    }
 }

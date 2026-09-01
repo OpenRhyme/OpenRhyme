@@ -64,6 +64,9 @@ public final class Database {
     }
 
     public func exec(_ sql: String) throws {
+        guard let handle else {
+            throw DatabaseError(code: SQLITE_MISUSE, message: "database is closed")
+        }
         var error: UnsafeMutablePointer<CChar>?
         let rc = sqlite3_exec(handle, sql, nil, nil, &error)
         guard rc == SQLITE_OK else {
@@ -74,6 +77,9 @@ public final class Database {
     }
 
     public func prepare(_ sql: String) throws -> Statement {
+        guard let handle else {
+            throw DatabaseError(code: SQLITE_MISUSE, message: "database is closed")
+        }
         var statement: OpaquePointer?
         let rc = sqlite3_prepare_v2(handle, sql, -1, &statement, nil)
         guard rc == SQLITE_OK, let statement else {
@@ -89,7 +95,8 @@ public final class Database {
         return statement.string(0)
     }
 
-    public var lastInsertRowID: Int64 { sqlite3_last_insert_rowid(handle) }
+    /// `0` once the database is closed (this property cannot throw).
+    public var lastInsertRowID: Int64 { handle.map { sqlite3_last_insert_rowid($0) } ?? 0 }
 }
 
 public final class Statement {
