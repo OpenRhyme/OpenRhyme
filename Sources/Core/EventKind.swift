@@ -1,0 +1,26 @@
+/// Every event kind the engine emits. Raw values are the strings stored in `events.kind`
+/// and are a public contract (spec §5).
+public enum EventKind: String, Codable, Sendable, CaseIterable {
+    case daemonStarted = "daemon.started"
+    case daemonStopped = "daemon.stopped"
+    case permissionChanged = "permission.changed"
+    case appLaunched = "app.launched"
+    case appTerminated = "app.terminated"
+    case appActivated = "app.activated"
+    case appDeactivated = "app.deactivated"
+    case appAXEnabled = "app.ax_enabled"
+    case appOpaque = "app.opaque"
+    case windowFocused = "window.focused"
+    case windowTitleChanged = "window.title_changed"
+    case windowCreated = "window.created"
+    case windowDestroyed = "window.destroyed"
+    case elementFocused = "element.focused"
+    case elementValueChanged = "element.value_changed"
+    case elementSelectionChanged = "element.selection_changed"
+    case menuItemSelected = "menu.item_selected"
+    case contextSnapshot = "context.snapshot"
+    case idleStarted = "idle.started"
+    case idleEnded = "idle.ended"
+    case systemSleep = "system.sleep"
+    case systemWake = "system.wake"
+}
