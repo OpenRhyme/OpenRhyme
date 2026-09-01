@@ -70,6 +70,30 @@ import Testing
         #expect(try String(contentsOf: out, encoding: .utf8).split(separator: "\n").count == 3)
     }
 
+    @Test func exportPagesInInsertionOrderEvenWithNonMonotonicTimestamps() async throws {
+        let dir = try CLIRunner.tempDataDir()
+        let store = try EventStore(url: dir.appendingPathComponent("events.sqlite"))
+        let now = Date().timeIntervalSince1970
+        // ts values are NOT monotonic in insertion order (e.g. a backward clock
+        // correction between two appends): id 1 has the latest ts, id 3 the earliest.
+        try await store.append(RawEvent(ts: now - 100, kind: .appActivated, bundleID: "com.a"))
+        try await store.append(RawEvent(ts: now - 50, kind: .windowFocused, bundleID: "com.a"))
+        try await store.append(RawEvent(ts: now - 75, kind: .elementFocused, bundleID: "com.b"))
+        await store.close()
+        let env = ["OPENRHYME_DATA_DIR": dir.path]
+
+        let result = try CLIRunner.run(["export", "--since", "1d"], env: env)
+        #expect(result.status == 0, "\(result.stderr)")
+        let lines = result.stdout.split(separator: "\n")
+        #expect(lines.count == 3)
+        let ids = lines.compactMap { line -> Int? in
+            guard let match = line.range(of: #""id":"#) else { return nil }
+            let rest = line[match.upperBound...]
+            return Int(rest.prefix(while: { $0.isNumber }))
+        }
+        #expect(ids == [1, 2, 3])
+    }
+
     @Test func missingDatabaseIsAStableError() throws {
         let env = ["OPENRHYME_DATA_DIR": try CLIRunner.tempDataDir().path]
         let result = try CLIRunner.run(["events", "--since", "1h", "--json"], env: env)

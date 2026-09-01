@@ -23,7 +23,11 @@ struct ExportCommand: AsyncParsableCommand {
             } else {
                 handle = FileHandle.standardOutput
             }
-            var afterID: Int64?
+            // Page in insertion (id) order, not ts order, per spec §7.3: export is
+            // documented as insertion order, and starting the cursor at 0 (ids are
+            // 1-based) keeps every page id-ordered, including the first, so a
+            // non-monotonic ts never lets a row fall through the paging cursor.
+            var afterID: Int64? = 0
             while true {
                 let page = try await store.query(
                     EventQuery(
