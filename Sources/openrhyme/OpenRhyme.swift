@@ -9,7 +9,8 @@ struct OpenRhyme: AsyncParsableCommand {
         abstract: "Local-first computer history for macOS: capture, store and query your activity.",
         version: "0.1.0",
         subcommands: [
-            AppsCommand.self, EventsCommand.self, ExportCommand.self, VersionCommand.self,
+            AppsCommand.self, EventsCommand.self, ExportCommand.self, InspectCommand.self,
+            VersionCommand.self,
         ],
         defaultSubcommand: nil)
 
