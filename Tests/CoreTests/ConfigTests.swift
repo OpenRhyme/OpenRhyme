@@ -60,4 +60,14 @@ import Testing
             text.range(of: "\"allowlist\"")!.lowerBound < text.range(of: "\"capture\"")!.lowerBound)
         #expect(text.contains(#""schema" : 1"#))
     }
+
+    @Test func outOfRangeNumericValuesKeepDefaults() throws {
+        let url = tempURL()
+        try """
+        {"schema":1,"capture":{"max_value_bytes":99999999999999999999,"value_debounce_ms":1.5}}
+        """.write(to: url, atomically: true, encoding: .utf8)
+        let config = try Config.load(from: url)
+        #expect(config.capture.maxValueBytes == 524_288)
+        #expect(config.capture.valueDebounceMs == 500)
+    }
 }

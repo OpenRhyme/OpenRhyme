@@ -18,8 +18,12 @@ public struct CaptureSettings: Sendable, Equatable {
         self.init()
         if let v = json[Self.keys.heartbeat]?.doubleValue { heartbeatSeconds = v }
         if let v = json[Self.keys.idle]?.doubleValue { idleSeconds = v }
-        if let v = json[Self.keys.debounce]?.doubleValue { valueDebounceMs = Int(v) }
-        if let v = json[Self.keys.maxValue]?.doubleValue { maxValueBytes = Int(v) }
+        if let v = json[Self.keys.debounce]?.doubleValue, let exact = Int(exactly: v) {
+            valueDebounceMs = exact
+        }
+        if let v = json[Self.keys.maxValue]?.doubleValue, let exact = Int(exactly: v) {
+            maxValueBytes = exact
+        }
         if let v = json[Self.keys.others]?.boolValue { recordOtherApps = v }
     }
 
