@@ -10,7 +10,7 @@ struct OpenRhyme: AsyncParsableCommand {
         version: "0.1.0",
         subcommands: [
             AppsCommand.self, EventsCommand.self, ExportCommand.self, InspectCommand.self,
-            VersionCommand.self,
+            StatusCommand.self, VersionCommand.self,
         ],
         defaultSubcommand: nil)
 
