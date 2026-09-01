@@ -13,7 +13,7 @@ public enum JSONLExport {
     public static func line(for event: RawEvent) throws -> String {
         var fields: [(String, String)] = []
         if let id = event.id { fields.append(("id", String(id))) }
-        fields.append(("ts", number(event.ts)))
+        fields.append(("ts", try number(event.ts)))
         fields.append(("kind", quoted(event.kind.rawValue)))
         if let pid = event.pid { fields.append(("pid", String(pid))) }
         let strings: [(String, String?)] = [
@@ -32,7 +32,10 @@ public enum JSONLExport {
         return "{" + fields.map { "\"\($0)\":\($1)" }.joined(separator: ",") + "}"
     }
 
-    private static func number(_ value: Double) -> String {
+    private static func number(_ value: Double) throws -> String {
+        guard value.isFinite else {
+            throw JSONLExportError(reason: "ts is not a finite number")
+        }
         if value == value.rounded(), abs(value) < 1e15 { return String(Int64(value)) }
         return String(value)
     }
@@ -55,4 +58,9 @@ public enum JSONLExport {
         }
         return out + "\""
     }
+}
+
+/// Thrown when an event cannot be represented as valid JSON (spec §7.3).
+public struct JSONLExportError: Error, Equatable, Sendable {
+    public let reason: String
 }

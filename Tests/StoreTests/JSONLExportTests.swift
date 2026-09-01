@@ -31,4 +31,16 @@ import Testing
         let back = try JSONDecoder().decode(RawEvent.self, from: Data(line.utf8))
         #expect(back == event)
     }
+
+    @Test func nanTimestampThrows() {
+        #expect(throws: (any Error).self) {
+            try JSONLExport.line(for: RawEvent(ts: .nan, kind: .idleStarted))
+        }
+    }
+
+    @Test func infiniteTimestampThrows() {
+        #expect(throws: (any Error).self) {
+            try JSONLExport.line(for: RawEvent(ts: .infinity, kind: .idleStarted))
+        }
+    }
 }
