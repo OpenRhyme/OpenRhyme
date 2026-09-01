@@ -50,18 +50,25 @@ enum CLIRunner {
         }
         try process.run()
 
-        // Drain stderr on a background queue while stdout drains on this thread, so a
-        // command that writes more than the pipe buffer to one stream while the other is
-        // still filling can't deadlock the child and the parent against each other.
+        // Drain stdout and stderr on private serial queues so neither pipe filling up can
+        // deadlock the child and the parent against each other. Private queues target the
+        // overcommit root queue, so they always get a thread even when Swift Testing's
+        // cooperative pool (which shares DispatchQueue.global()'s worker pool) is saturated
+        // by other parallel CLI tests blocked here.
+        let outBox = DataBox()
         let errBox = DataBox()
+        let outHandle = out.fileHandleForReading
         let errHandle = err.fileHandleForReading
         let group = DispatchGroup()
-        DispatchQueue.global().async(group: group) { errBox.set(errHandle.readDataToEndOfFile()) }
-        let stdout = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        let outQueue = DispatchQueue(label: "openrhyme.cli-runner.stdout")
+        let errQueue = DispatchQueue(label: "openrhyme.cli-runner.stderr")
+        outQueue.async(group: group) { outBox.set(outHandle.readDataToEndOfFile()) }
+        errQueue.async(group: group) { errBox.set(errHandle.readDataToEndOfFile()) }
         group.wait()
+        process.waitUntilExit()
+        let stdout = String(decoding: outBox.get(), as: UTF8.self)
         let stderr = String(decoding: errBox.get(), as: UTF8.self)
 
-        process.waitUntilExit()
         return (stdout, stderr, process.terminationStatus)
     }
 
