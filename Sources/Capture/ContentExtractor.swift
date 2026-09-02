@@ -1,5 +1,5 @@
-// Capture — deep AX content extraction (spec §4). The `extract` ladder body lands in a
-// follow-up task; this file declares the pure wire types it is built on.
+// Capture — deep AX content extraction (spec §4): the pure rung ladder (own value → ranged
+// text → bounded subtree harvest) plus the cache-hit resolution, over an AX-free `TextNode`.
 
 /// Which rung of the content ladder produced an element's text (spec §4).
 public enum TextSource: String, Sendable {
@@ -61,6 +61,19 @@ public enum ContentExtractor {
         harvest(node, maxBytes: maxBytes, budget: &budget, bytes: &bytes, into: &pieces)
         guard !pieces.isEmpty else { return ExtractedText() }
         return ExtractedText(value: pieces.joined(separator: "\n"), source: .subtree)
+    }
+
+    /// The cache-hit resolution (spec §6): rung 1 (own value) is cheap, so re-read it every
+    /// heartbeat — a native field's fresh text must never be masked by a stale cache. Only the
+    /// expensive rungs 2-3 are reused from the cache. A secure element yields nothing, always.
+    public static func resolveHit(
+        from node: TextNode, cachedValue: String?, cachedSource: TextSource?
+    ) -> ExtractedText {
+        if node.subrole == ElementInfo.secureSubrole { return ExtractedText() }
+        if let own = try? node.ownValue(), !own.isEmpty {
+            return ExtractedText(value: own, source: .value)
+        }
+        return ExtractedText(value: cachedValue, source: cachedSource)
     }
 
     private static func harvest(

@@ -61,10 +61,17 @@ public final class AXClient: AXReading {
                     role: role, subrole: subrole, identifier: identifier, title: title,
                     windowTitle: window?.title, document: window?.document, url: window?.url)
             {
-                // Cache hit: reuse content, skip the expensive rungs.
+                // Cache hit: rung 1 (own value) is cheap and must stay fresh so native-field
+                // edits aren't masked; only the expensive rungs 2-3 are reused (spec §6).
                 var info = try readElementIdentityOnly(focused)
-                info.value = cache.value
-                info.textSource = cache.textSource
+                if !info.isSecure {
+                    let resolved = ContentExtractor.resolveHit(
+                        from: AXUIElementTextNode(focused, client: self),
+                        cachedValue: cache.value,
+                        cachedSource: cache.textSource.flatMap(TextSource.init(rawValue:)))
+                    info.value = resolved.value
+                    info.textSource = resolved.source?.rawValue
+                }
                 element = info
             } else {
                 contentReadCount += 1

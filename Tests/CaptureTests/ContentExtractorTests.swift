@@ -103,4 +103,30 @@ private struct Node: TextNode {
         let r = ContentExtractor.extract(from: n, maxBytes: 1000)
         #expect(r.value == "after")
     }
+
+    @Test func resolveHitPrefersFreshOwnValueOverStaleCache() {
+        let n = Node(role: "AXTextArea", value: "fresh typed text")
+        let r = ContentExtractor.resolveHit(from: n, cachedValue: "stale", cachedSource: .value)
+        #expect(r == ExtractedText(value: "fresh typed text", source: .value))
+    }
+
+    @Test func resolveHitReusesCacheWhenOwnValueEmpty() {
+        let n = Node(role: "AXWebArea", value: nil)  // browser: rung 1 empty
+        let r = ContentExtractor.resolveHit(
+            from: n, cachedValue: "harvested page", cachedSource: .subtree)
+        #expect(r == ExtractedText(value: "harvested page", source: .subtree))
+    }
+
+    @Test func resolveHitNeverReadsSecureField() {
+        // Even a (hypothetical) non-nil cache for a now-secure element must not surface.
+        let n = Node(role: "AXTextField", subrole: "AXSecureTextField", value: "hunter2")
+        let r = ContentExtractor.resolveHit(from: n, cachedValue: "hunter2", cachedSource: .value)
+        #expect(r == ExtractedText(value: nil, source: nil))
+    }
+
+    @Test func resolveHitEmptyOwnValueNoCacheYieldsNothing() {
+        let n = Node(role: "AXGroup", value: nil)
+        let r = ContentExtractor.resolveHit(from: n, cachedValue: nil, cachedSource: nil)
+        #expect(r == ExtractedText(value: nil, source: nil))
+    }
 }
