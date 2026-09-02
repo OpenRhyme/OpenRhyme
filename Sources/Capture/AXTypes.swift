@@ -51,11 +51,13 @@ public struct ElementInfo: Sendable, Equatable {
     public var selectedText: String?
     public var selectedRange: TextRange?
     public var numberOfCharacters: Int?
+    public var textSource: String?
 
     public init(
         role: String? = nil, subrole: String? = nil, identifier: String? = nil,
         title: String? = nil, value: String? = nil, selectedText: String? = nil,
-        selectedRange: TextRange? = nil, numberOfCharacters: Int? = nil
+        selectedRange: TextRange? = nil, numberOfCharacters: Int? = nil,
+        textSource: String? = nil
     ) {
         self.role = role
         self.subrole = subrole
@@ -65,6 +67,7 @@ public struct ElementInfo: Sendable, Equatable {
         self.selectedText = selectedText
         self.selectedRange = selectedRange
         self.numberOfCharacters = numberOfCharacters
+        self.textSource = textSource
     }
 
     public var isSecure: Bool { subrole == Self.secureSubrole }
@@ -79,6 +82,46 @@ public struct FocusedContext: Sendable, Equatable {
         self.app = app
         self.window = window
         self.element = element
+    }
+}
+
+/// The cheap-identity + resolved content of a focused element, cached across heartbeats so the
+/// expensive content read (spec §6) is skipped when nothing user-visible changed.
+public struct ContentCache: Sendable, Equatable {
+    public var role: String?
+    public var subrole: String?
+    public var identifier: String?
+    public var title: String?
+    public var windowTitle: String?
+    public var document: String?
+    public var url: String?
+    public var value: String?
+    public var textSource: String?
+
+    public init(
+        role: String? = nil, subrole: String? = nil, identifier: String? = nil,
+        title: String? = nil, windowTitle: String? = nil, document: String? = nil,
+        url: String? = nil, value: String? = nil, textSource: String? = nil
+    ) {
+        self.role = role
+        self.subrole = subrole
+        self.identifier = identifier
+        self.title = title
+        self.windowTitle = windowTitle
+        self.document = document
+        self.url = url
+        self.value = value
+        self.textSource = textSource
+    }
+
+    /// True when the cheap identity is unchanged, so the cached `value`/`textSource` may be reused.
+    public func matches(
+        role: String?, subrole: String?, identifier: String?, title: String?,
+        windowTitle: String?, document: String?, url: String?
+    ) -> Bool {
+        self.role == role && self.subrole == subrole && self.identifier == identifier
+            && self.title == title && self.windowTitle == windowTitle
+            && self.document == document && self.url == url
     }
 }
 
