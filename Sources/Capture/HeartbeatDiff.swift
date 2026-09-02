@@ -102,6 +102,9 @@ public enum HeartbeatDiff {
                 extra["length"] = .number(Double(redacted.length))
             }
             if valueUnchanged { extra["valueUnchanged"] = true }
+            if let textSource = context.element?.textSource {
+                extra["textSource"] = .string(textSource)
+            }
             events.append(
                 RawEvent(
                     ts: input.now, kind: .contextSnapshot, pid: app.pid, bundleID: app.bundleID,

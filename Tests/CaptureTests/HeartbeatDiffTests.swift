@@ -139,4 +139,26 @@ import Testing
         #expect(second.events.map(\.kind) == [.appDeactivated])
         #expect(second.state.frontmost == nil)
     }
+
+    @Test func snapshotCarriesTextSource() {
+        let element = ElementInfo(role: "AXWebArea", value: "page body")
+        var el = element
+        el.textSource = "subtree"
+        let out = HeartbeatDiff.compute(
+            previous: LastKnownState(),
+            input: input(safari, window: WindowInfo(title: "Apple"), element: el))
+        let snapshot = out.events.first { $0.kind == .contextSnapshot }
+        #expect(snapshot?.extra?["textSource"] == "subtree")
+        #expect(snapshot?.value == "page body")
+    }
+
+    @Test func snapshotOmitsTextSourceWhenAbsent() {
+        let out = HeartbeatDiff.compute(
+            previous: LastKnownState(),
+            input: input(
+                safari, window: WindowInfo(title: "Apple"),
+                element: ElementInfo(role: "AXGroup")))
+        let snapshot = out.events.first { $0.kind == .contextSnapshot }
+        #expect(snapshot?.extra?["textSource"] == nil)
+    }
 }
