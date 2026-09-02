@@ -75,6 +75,8 @@ make run                                     # starts the daemon in the foregrou
 .build/debug/openrhyme export --since 1d --out today.jsonl
 ```
 
+`events` now carries the visible on-screen text in `value` for every captured app, and `extra.textSource` says which extraction path produced it.
+
 The daemon needs the **Accessibility** grant. When launched from a terminal, macOS attributes the request to the terminal app, so grant it to Terminal/iTerm (System Settings → Privacy & Security → Accessibility). `openrhyme inspect` shows exactly what the daemon can see for the frontmost app. Ad-hoc-signed `swift build` binaries lose the grant on every rebuild — read `docs/accessibility-api.md` §2 before trying.
 
 ## Roadmap and open questions

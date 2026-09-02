@@ -188,6 +188,10 @@ No single attribute works everywhere. First non-empty result wins:
 3. `kAXDescriptionAttribute` / `kAXTitleAttribute` for static text and controls
 4. Literal legacy names `"AXValueAttribute"` (old WebKit) and `"AXText"` (some Electron / CEF builds) — keep a per-app table for these
 
+**As shipped** (`Sources/Capture/ContentExtractor.swift`, `AXClient.focusedContext(of:reusing:)`): the above collapsed into a three-rung ladder — own value (`kAXValueAttribute`, falling back to a stringified number or, for `AXStaticText`, `kAXDescriptionAttribute`/`kAXTitleAttribute`) → `kAXStringForRangeParameterizedAttribute` over `kAXVisibleCharacterRangeAttribute` → a bounded subtree harvest of `AXStaticText`/`AXHeading`/`AXLink`/`AXButton` descendants (node budget 1500, byte-capped, secure subrole skipped at every depth so a password field's text is never read even nested inside a harvested subtree). Whichever rung produces the value is recorded in `extra.textSource` (`value` / `range` / `subtree`); absent when no rung found anything.
+
+Rungs 2–3 are the expensive part — a browser's own `value` is typically empty, so without a guard they would re-run on every heartbeat over the same page. `focusedContext` is passed the previous heartbeat's cheap identity (window title/document/url plus the focused element's role/subrole/identifier/title, all already read anyway) and only re-runs the ladder when that identity changed; on a match it reuses the cached `value`/`textSource` instead. A static page is harvested once per focus/navigation, not every heartbeat.
+
 ### 6.3 Coverage failures
 
 Qt, Java/Swing without the AX bridge, OpenGL/Metal games, Flutter (partial), many terminal emulators (the screen is one giant `AXTextArea`, or nothing). Expect `kAXErrorCannotComplete` / `kAXErrorNotImplemented`; after N failures classify the app *opaque* and fall back to app + window title (ActivityWatch level). Report the classification in `status` so the user knows what is and isn't covered.
