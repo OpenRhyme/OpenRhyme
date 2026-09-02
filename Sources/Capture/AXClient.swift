@@ -37,7 +37,11 @@ public final class AXClient: AXReading {
         NSWorkspace.shared.frontmostApplication.map(AppInfo.init(running:))
     }
 
-    public func focusedContext(of app: AppInfo) throws -> FocusedContext {
+    public private(set) var contentReadCount = 0
+
+    public func focusedContext(
+        of app: AppInfo, reusing cache: ContentCache?
+    ) throws -> FocusedContext {
         let application = AXUIElementCreateApplication(app.pid)
         var window: WindowInfo?
         if let focusedWindow = try element(application, kAXFocusedWindowAttribute) {
@@ -45,9 +49,60 @@ public final class AXClient: AXReading {
         }
         var element: ElementInfo?
         if let focused = try self.element(application, kAXFocusedUIElementAttribute) {
-            element = try readElement(focused)
+            let ids = try attributes(
+                focused,
+                [kAXRoleAttribute, kAXSubroleAttribute, kAXIdentifierAttribute, kAXTitleAttribute])
+            let role = string(ids[0])
+            let subrole = string(ids[1])
+            let identifier = string(ids[2])
+            let title = string(ids[3])
+            if let cache,
+                cache.matches(
+                    role: role, subrole: subrole, identifier: identifier, title: title,
+                    windowTitle: window?.title, document: window?.document, url: window?.url)
+            {
+                // Cache hit: reuse content, skip the expensive rungs.
+                var info = try readElementIdentityOnly(focused)
+                info.value = cache.value
+                info.textSource = cache.textSource
+                element = info
+            } else {
+                contentReadCount += 1
+                element = try readElement(focused)
+            }
         }
         return FocusedContext(app: app, window: window, element: element)
+    }
+
+    /// Identity + selection only (no content ladder), for the cache-hit path.
+    func readElementIdentityOnly(_ element: AXUIElement) throws -> ElementInfo {
+        let identity = try attributes(
+            element,
+            [kAXRoleAttribute, kAXSubroleAttribute, kAXIdentifierAttribute, kAXTitleAttribute])
+        var info = ElementInfo(
+            role: string(identity[0]), subrole: string(identity[1]),
+            identifier: string(identity[2]), title: string(identity[3]))
+        guard !info.isSecure else { return info }
+        let content = try attributes(
+            element,
+            [
+                kAXSelectedTextAttribute, kAXSelectedTextRangeAttribute,
+                kAXNumberOfCharactersAttribute,
+            ])
+        info.selectedText = string(content[0])
+        info.selectedRange = range(content[1])
+        info.numberOfCharacters = number(content[2]).map(Int.init)
+        return info
+    }
+
+    /// Build a cache key from a just-read context.
+    public func cache(from context: FocusedContext) -> ContentCache {
+        ContentCache(
+            role: context.element?.role, subrole: context.element?.subrole,
+            identifier: context.element?.identifier, title: context.element?.title,
+            windowTitle: context.window?.title, document: context.window?.document,
+            url: context.window?.url, value: context.element?.value,
+            textSource: context.element?.textSource)
     }
 
     public func secondsSinceLastInput() -> Double {
@@ -74,20 +129,22 @@ public final class AXClient: AXReading {
             identifier: string(identity[2]), title: string(identity[3]))
         guard !info.isSecure else { return info }
 
+        // value + textSource via the content ladder (spec §4). 512 KB harvest guard; Redaction
+        // applies the authoritative per-config cap downstream.
+        let extracted = ContentExtractor.extract(
+            from: AXUIElementTextNode(element, client: self), maxBytes: 524_288)
+        info.value = extracted.value
+        info.textSource = extracted.source?.rawValue
+
         let content = try attributes(
             element,
             [
-                kAXValueAttribute, kAXSelectedTextAttribute, kAXSelectedTextRangeAttribute,
-                kAXNumberOfCharactersAttribute, kAXDescriptionAttribute,
+                kAXSelectedTextAttribute, kAXSelectedTextRangeAttribute,
+                kAXNumberOfCharactersAttribute,
             ])
-        // Spec §6.4 order: value → selected text → description for static text.
-        info.value = string(content[0]) ?? number(content[0]).map { String($0) }
-        if info.value == nil, info.role == kAXStaticTextRole {
-            info.value = string(content[4]) ?? info.title
-        }
-        info.selectedText = string(content[1])
-        info.selectedRange = range(content[2])
-        info.numberOfCharacters = number(content[3]).map(Int.init)
+        info.selectedText = string(content[0])
+        info.selectedRange = range(content[1])
+        info.numberOfCharacters = number(content[2]).map(Int.init)
         return info
     }
 
@@ -148,6 +205,29 @@ public final class AXClient: AXReading {
         }
     }
 
+    // MARK: - Ranged text (spec §4.1)
+
+    /// The element's visible character range, if it advertises one.
+    func visibleCharacterRange(_ element: AXUIElement) throws -> TextRange? {
+        var value: CFTypeRef?
+        let error = AXUIElementCopyAttributeValue(
+            element, kAXVisibleCharacterRangeAttribute as CFString, &value)
+        try check(error)
+        return range(value)
+    }
+
+    /// The text for a character range, via the parameterized `AXStringForRange` attribute.
+    /// Returns nil when the element does not support it (mapped to no-error by `check`).
+    func stringForRange(_ element: AXUIElement, _ textRange: TextRange) throws -> String? {
+        var cfRange = CFRange(location: textRange.location, length: textRange.length)
+        guard let param = AXValueCreate(.cfRange, &cfRange) else { return nil }
+        var value: CFTypeRef?
+        let error = AXUIElementCopyParameterizedAttributeValue(
+            element, kAXStringForRangeParameterizedAttribute as CFString, param, &value)
+        try check(error)
+        return string(value)
+    }
+
     // MARK: - CF conversions
 
     func string(_ value: CFTypeRef?) -> String? {
@@ -172,5 +252,49 @@ public final class AXClient: AXReading {
         var cfRange = CFRange()
         guard AXValueGetValue(axValue, .cfRange, &cfRange) else { return nil }
         return TextRange(location: cfRange.location, length: cfRange.length)
+    }
+}
+
+/// `TextNode` backed by a real `AXUIElement`, so `ContentExtractor` can read the live tree.
+@MainActor
+struct AXUIElementTextNode: @MainActor TextNode {
+    let element: AXUIElement
+    unowned let client: AXClient
+    let role: String?
+    let subrole: String?
+
+    init(_ element: AXUIElement, client: AXClient) {
+        self.element = element
+        self.client = client
+        let ids =
+            (try? client.attributes(element, [kAXRoleAttribute, kAXSubroleAttribute])) ?? [
+                nil, nil,
+            ]
+        self.role = client.string(ids[0])
+        self.subrole = client.string(ids[1])
+    }
+
+    /// Rung 1, behaviour-identical to the pre-slice value read: value → number-as-string →
+    /// (static text) description → title.
+    func ownValue() throws -> String? {
+        let content = try client.attributes(
+            element, [kAXValueAttribute, kAXDescriptionAttribute, kAXTitleAttribute])
+        if let s = client.string(content[0]) { return s }
+        if let n = client.number(content[0]) { return String(n) }
+        if role == kAXStaticTextRole {
+            return client.string(content[1]) ?? client.string(content[2])
+        }
+        return nil
+    }
+
+    func rangedText() throws -> String? {
+        guard let vr = try client.visibleCharacterRange(element), vr.length > 0 else { return nil }
+        return try client.stringForRange(element, vr)
+    }
+
+    func children() throws -> [TextNode] {
+        try client.elements(element, kAXChildrenAttribute).map {
+            AXUIElementTextNode($0, client: self.client)
+        }
     }
 }

@@ -147,8 +147,12 @@ public protocol AXReading: AnyObject {
     func setGlobalMessagingTimeout(_ seconds: Float)
     func runningApplications() -> [AppInfo]
     func frontmostApplication() -> AppInfo?
-    /// Focused window and element of `app`. Throws `AXReadError` when the app cannot be read.
-    func focusedContext(of app: AppInfo) throws -> FocusedContext
+    /// Focused window and element of `app`. `reusing` is the previous heartbeat's cached
+    /// cheap-identity + content; when the cheap identity is unchanged the expensive content read
+    /// is skipped and the cached value reused (spec §6). Throws `AXReadError` when the app cannot be read.
+    func focusedContext(of app: AppInfo, reusing cache: ContentCache?) throws -> FocusedContext
     /// Seconds since the last keyboard/mouse event in this session. Needs no TCC grant.
     func secondsSinceLastInput() -> Double
+    /// Build a cache key from a just-read context.
+    func cache(from context: FocusedContext) -> ContentCache
 }

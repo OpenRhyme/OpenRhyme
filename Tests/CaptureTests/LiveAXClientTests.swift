@@ -9,7 +9,7 @@ import Testing
         let client = AXClient()
         #expect(client.isTrusted(prompt: false), "grant Accessibility to the terminal first")
         let frontmost = try #require(client.frontmostApplication())
-        let context = try client.focusedContext(of: frontmost)
+        let context = try client.focusedContext(of: frontmost, reusing: nil)
         #expect(context.app == frontmost)
         #expect(client.runningApplications().contains { $0.pid == frontmost.pid })
         #expect(client.secondsSinceLastInput() >= 0)

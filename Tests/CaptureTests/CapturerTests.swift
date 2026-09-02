@@ -223,4 +223,18 @@ import Testing
         let events = await drain(capturer)
         #expect(events.map(\.kind) == [.permissionChanged, .appActivated, .contextSnapshot])
     }
+
+    @Test func heartbeatThreadsTheContentCacheBackToTheReader() async throws {
+        let fake = FakeAXClient()
+        fake.show(
+            safari, window: WindowInfo(title: "Apple"),
+            element: ElementInfo(role: "AXWebArea", value: "page text"))
+        let (capturer, _) = try makeCapturer(fake: fake)
+        capturer.tick()  // first read: reusing is nil
+        #expect(fake.lastReusing == nil)
+        capturer.tick()  // second read: the capturer should pass back the cache it built
+        #expect(fake.lastReusing != nil)
+        #expect(fake.lastReusing?.value == "page text")
+        _ = await drain(capturer)
+    }
 }

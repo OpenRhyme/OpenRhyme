@@ -23,6 +23,7 @@ public final class Capturer {
     private var loop: Task<Void, Never>?
     private var staleBackoff: Double = 5
     private var nextTrustCheck: Double = 0
+    private var lastContentCache: [Int32: ContentCache] = [:]
 
     public init(
         ax: any AXReading, paths: Paths, config: Config,
@@ -117,9 +118,11 @@ public final class Capturer {
         var context: FocusedContext?
         if let frontmost, HeartbeatDiff.isAllowed(frontmost, config.allowlistSet) {
             do {
-                context = try ax.focusedContext(of: frontmost)
+                context = try ax.focusedContext(
+                    of: frontmost, reusing: lastContentCache[frontmost.pid])
                 readFailures[frontmost.pid] = nil
                 staleBackoff = 5
+                if let context { lastContentCache[frontmost.pid] = ax.cache(from: context) }
             } catch AXReadError.apiDisabled {
                 setTrust(.stale)
                 scheduleStaleRetry()

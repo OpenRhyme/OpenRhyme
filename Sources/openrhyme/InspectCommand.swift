@@ -41,7 +41,7 @@ struct InspectCommand: AsyncParsableCommand {
                     return Inspection(
                         app: nil, window: nil, element: nil, attributeNames: [], tree: nil)
                 }
-                let context = try client.focusedContext(of: app)
+                let context = try client.focusedContext(of: app, reusing: nil)
                 let inspection = try client.focusedElementInspection(of: app, depth: depth)
                 return Inspection(
                     app: app, window: context.window, element: context.element,
