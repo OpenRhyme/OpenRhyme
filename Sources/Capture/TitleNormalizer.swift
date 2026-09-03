@@ -12,10 +12,14 @@ public enum TitleNormalizer {
     /// share across threads for read-only matching.
     nonisolated(unsafe) private static let leadingCounter = #/^\(\d+\)\s+/#
     /// Rule 3: Chrome tab badges. Data-driven; extend here, with a test.
+    /// `Regex` isn't `Sendable`, but these literals are never mutated after creation — safe to
+    /// share across threads for read-only matching.
     nonisolated(unsafe) private static let chromeBadges = [
         #/ - Audio playing/#, #/ - Muted/#, #/ - High memory usage - [\d.,]+ [KMG]B/#,
     ]
     /// Rule 4.
+    /// `Regex` isn't `Sendable`, but these literals are never mutated after creation — safe to
+    /// share across threads for read-only matching.
     nonisolated(unsafe) private static let whitespace = #/\s+/#
 
     public static func normalize(_ title: String) -> String {

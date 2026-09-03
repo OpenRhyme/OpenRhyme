@@ -21,6 +21,10 @@ None of this is *new information*; almost all of it is the screen changing by it
 - **No compaction, entities, or episodes** — that is the next slice; it will key on the `fingerprint` this slice stores.
 - **No per-app content depth or privacy categories** — the privacy slice.
 - No `status` output change; no schema v2.
+- **Accepted losses found during review:**
+  - A user-driven title or value change killed by an app switch inside the debounce window is lost outright, with no heartbeat backstop (new for titles; already true for values).
+  - A title change subsumed by a value refresh in the same window is emitted as `element.value_changed`, losing its `window.title_changed` kind and `extra.previousTitle` (the title itself still rides in `windowTitle`).
+  - An app visit shorter than `activation_settle_ms` produces no `app.activated`/`app.deactivated` pair at all, not merely one refresh instead of two.
 
 ## 3. Success criteria
 
@@ -130,8 +134,8 @@ Nothing in this slice reads anything new. Normalization and hashing operate on a
 |---|---|
 | `Sources/Capture/TitleNormalizer.swift` | **New.** §5 rule table. |
 | `Sources/Capture/Fingerprint.swift` | **New.** §4 canonical string + 16-hex SHA-256 (uses `Core.Hashing`). |
-| `Sources/Capture/HeartbeatDiff.swift` | normalized signature; `fingerprint` and `input` in `extra`; recent-content memory; anonymous transparency. |
-| `Sources/Capture/AXTypes.swift` | `ContentCache.matches` on normalized titles; `ElementInfo.readoutRoles` / `isAnonymous`; `RecentValueHashes`; `AXReading.startObserving(_:kinds:handler:)`. |
+| `Sources/Capture/HeartbeatDiff.swift` | normalized signature; `fingerprint` and `input` in `extra`; recent-content memory (`RecentValueHashes`); anonymous transparency. |
+| `Sources/Capture/AXTypes.swift` | `ContentCache.matches` on normalized titles; `ElementInfo.readoutRoles` / `isAnonymous`; `AXReading.startObserving(_:kinds:handler:)`. |
 | `Sources/Capture/ContentExtractor.swift` | readout-role short-circuit in `extract` / `resolveHit`. |
 | `Sources/Capture/Capturer.swift` | input classification; title debounce path; activation settle; effective-kinds resolution and re-registration. |
 | `Sources/Capture/AXObserverHub.swift`, `AXClient.swift` | register only the requested kinds. |

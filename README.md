@@ -81,6 +81,27 @@ Capture is event-driven: app, window, element and title changes, typing (debounc
 
 The daemon needs the **Accessibility** grant. When launched from a terminal, macOS attributes the request to the terminal app, so grant it to Terminal/iTerm (System Settings → Privacy & Security → Accessibility). `openrhyme inspect` shows exactly what the daemon can see for the frontmost app. Ad-hoc-signed `swift build` binaries lose the grant on every rebuild — read `docs/accessibility-api.md` §2 before trying.
 
+## Configuration
+
+`config.json` (in the data dir — `$OPENRHYME_DATA_DIR` or `~/Library/Application Support/OpenRhyme/`) carries the allowlist and, under `capture`, the noise-reduction keys added by this slice — all optional, defaults shown:
+
+| Key | Default | What |
+|---|---|---|
+| `user_input_window_seconds` | `2` | input within this many seconds of a notification marks it user-driven; older marks it ambient (`extra.input`) |
+| `content_memory_seconds` | `1800` | how long a stored value's hash suppresses re-storing the same body |
+| `activation_settle_ms` | `200` | how long to wait after an app activation before reading the focused context |
+| `notifications` | `["window","focus","title","value","menu"]` | the global set of AX notification families to observe |
+| `apps` | `{}` | per-bundle-id overrides |
+
+```json
+"capture": {
+  "notifications": ["window", "focus", "title", "value", "menu"],
+  "apps": { "com.cmuxterm.app": { "notifications": ["window", "focus", "menu"] } }
+}
+```
+
+`value` implies `focus` — a value notification is registered on the focused element and must follow it. `activation_settle_ms` should stay ≤ `value_debounce_ms` (defaults 200 ms ≤ 500 ms) so a debounced refresh never lands before the just-activated app's AX tree has settled. A config edit re-registers the affected observers within one heartbeat, no daemon restart needed.
+
 ## Roadmap and open questions
 
 From spec §9:
