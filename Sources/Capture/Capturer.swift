@@ -16,7 +16,7 @@ public final class Capturer {
     public private(set) var readFailures: [Int32: Int] = [:]
 
     private let ax: any AXReading
-    private let paths: Paths
+    public let paths: Paths
     private let now: @Sendable () -> Double
     private let continuation: AsyncStream<RawEvent>.Continuation
     private let logger = Logger(subsystem: "org.openrhyme.engine", category: "capture")
@@ -27,6 +27,8 @@ public final class Capturer {
     private var lastContentCache: [Int32: ContentCache] = [:]
     /// Pids with a live observer (spec §5.5).
     public private(set) var observed: Set<Int32> = []
+    /// The kinds each observed pid is currently registered for (spec §6.7).
+    private var observedKinds: [Int32: Set<ObservedKind>] = [:]
     private var electronEnabled: Set<Int32> = []
     private var observeFailedAt: [Int32: Double] = [:]
     private var observeRetries: [Int32: Task<Void, Never>] = [:]
@@ -91,13 +93,19 @@ public final class Capturer {
         reconcileObservers()
     }
 
+    /// Spec 2026-09-03 §6.7: the notification families in force for an app.
+    func enabledKinds(for app: AppInfo) -> Set<ObservedKind> {
+        ObservedKind.kinds(fromConfig: config.capture.effectiveNotifications(for: app.bundleID))
+    }
+
     /// Spec 2026-09-03 §6.1. Every notification for the frontmost app is classified by input
     /// recency: user-driven changes are recorded now (titles/values after one debounce); ambient
     /// title and value changes are dropped — the heartbeat samples them. Focus and window changes
     /// always refresh. Public so the hub's handler and tests drive it.
     public func handle(change: ObservedChange) {
         guard trust == .active, let frontmost = ax.frontmostApplication(),
-            change.pid == frontmost.pid
+            change.pid == frontmost.pid,
+            enabledKinds(for: frontmost).contains(change.kind)
         else { return }
         let input: InputClass =
             ax.secondsSinceLastInput() <= config.capture.userInputWindowSeconds ? .user : .ambient
@@ -121,7 +129,7 @@ public final class Capturer {
         }
     }
 
-    /// Spec §6.1 / §6.4. One pending refresh per pid; every user-driven title or value change
+    /// Spec 2026-09-03 §6.1 / observers-spec §6.4. One pending refresh per pid; every user-driven title or value change
     /// restarts the quiet period. A pending value refresh (fresh read) subsumes a title one.
     private func scheduleRefresh(for pid: Int32, freshRead: Bool, input: InputClass) {
         let fresh = freshRead || (pendingFreshRead[pid] ?? false)
@@ -142,7 +150,7 @@ public final class Capturer {
         }
     }
 
-    /// Spec §6.4: a pending refresh is dropped, not run, once the focused context has moved.
+    /// Spec observers-spec §6.4: a pending refresh is dropped, not run, once the focused context has moved.
     private func dropPendingRefresh(for pid: Int32) {
         pendingRefresh[pid]?.cancel()
         pendingRefresh[pid] = nil
@@ -182,6 +190,8 @@ public final class Capturer {
             scheduleActivationRefresh()
         case .sleep:
             dropAllPendingRefreshes()
+            pendingActivation?.cancel()
+            pendingActivation = nil
             emit(RawEvent(ts: now(), kind: .systemSleep))
         case .wake:
             emit(RawEvent(ts: now(), kind: .systemWake))
@@ -210,9 +220,13 @@ public final class Capturer {
     }
 
     private func attemptObserve(_ app: AppInfo, attempt: Int) {
+        let kinds = enabledKinds(for: app)
         do {
-            try ax.startObserving(app) { [weak self] change in self?.handle(change: change) }
+            try ax.startObserving(app, kinds: kinds) { [weak self] change in
+                self?.handle(change: change)
+            }
             observed.insert(app.pid)
+            observedKinds[app.pid] = kinds
             observeFailedAt[app.pid] = nil
             observeRetries[app.pid] = nil
         } catch AXReadError.apiDisabled {
@@ -247,6 +261,7 @@ public final class Capturer {
         observeRetries[pid] = nil
         if observed.contains(pid) { ax.stopObserving(pid: pid) }
         observed.remove(pid)
+        observedKinds[pid] = nil
         electronEnabled.remove(pid)
         observeFailedAt[pid] = nil
         lastContentCache[pid] = nil
@@ -261,6 +276,14 @@ public final class Capturer {
             HeartbeatDiff.isAllowed($0, config.allowlistSet)
         }
         let runningPids = Set(running.map(\.pid))
+        // Spec §6.7: a config edit changed an observed app's set → re-register with the new one.
+        for app in running
+        where observed.contains(app.pid) && observedKinds[app.pid] != enabledKinds(for: app) {
+            let electron = electronEnabled.contains(app.pid)
+            unobserve(app.pid)
+            if electron { electronEnabled.insert(app.pid) }  // same pid lifetime: no second write
+            observe(app)
+        }
         for app in running where !observed.contains(app.pid) {
             if let failedAt = observeFailedAt[app.pid],
                 now() - failedAt < Self.reconcileRetrySeconds

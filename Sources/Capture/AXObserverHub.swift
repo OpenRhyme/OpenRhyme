@@ -17,16 +17,25 @@ final class AXObserverHub {
         let application: AXUIElement
         var focused: AXUIElement?
         let handler: Handler
+        let kinds: Set<ObservedKind>
+        var registered: [String] = []
         var loggedUnsupported: Set<String> = []
     }
 
-    /// Registered on the application element. App activation is deliberately absent —
+    /// App-element notifications per family (spec §6.7). App activation is deliberately absent —
     /// `AppLifecycle` (NSWorkspace) is the single source for it, so it cannot double-fire.
-    private static let applicationNotifications: [String] = [
-        kAXFocusedWindowChangedNotification, kAXMainWindowChangedNotification,
-        kAXFocusedUIElementChangedNotification, kAXTitleChangedNotification,
-        kAXMenuItemSelectedNotification,
-    ]
+    private static func applicationNotifications(for kinds: Set<ObservedKind>) -> [String] {
+        var names: [String] = []
+        if kinds.contains(.focusedWindowChanged) {
+            names += [kAXFocusedWindowChangedNotification, kAXMainWindowChangedNotification]
+        }
+        if kinds.contains(.focusedElementChanged) {
+            names.append(kAXFocusedUIElementChangedNotification)
+        }
+        if kinds.contains(.titleChanged) { names.append(kAXTitleChangedNotification) }
+        if kinds.contains(.menuItemSelected) { names.append(kAXMenuItemSelectedNotification) }
+        return names
+    }
 
     private var entries: [Int32: Entry] = [:]
     private let logger = Logger(subsystem: "org.openrhyme.engine", category: "observer")
@@ -38,18 +47,20 @@ final class AXObserverHub {
 
     var observedPids: Set<Int32> { Set(entries.keys) }
 
-    func start(pid: Int32, handler: @escaping Handler) throws {
+    func start(pid: Int32, kinds: Set<ObservedKind>, handler: @escaping Handler) throws {
         guard entries[pid] == nil else { return }
         var created: AXObserver?
         try check(AXObserverCreate(pid, observerCallback, &created))
         guard let observer = created else { throw AXReadError.cannotComplete }
         let application = AXUIElementCreateApplication(pid)
         var entry = Entry(
-            observer: observer, application: application, focused: nil, handler: handler)
-        for name in Self.applicationNotifications {
+            observer: observer, application: application, focused: nil, handler: handler,
+            kinds: kinds)
+        for name in Self.applicationNotifications(for: kinds) {
             try add(name, on: application, entry: &entry, pid: pid)
+            entry.registered.append(name)
         }
-        if let focused = focusedElement(of: application) {
+        if kinds.contains(.valueChanged), let focused = focusedElement(of: application) {
             try add(kAXValueChangedNotification, on: focused, entry: &entry, pid: pid)
             entry.focused = focused
         }
@@ -64,7 +75,7 @@ final class AXObserverHub {
             AXObserverRemoveNotification(
                 entry.observer, focused, kAXValueChangedNotification as CFString)
         }
-        for name in Self.applicationNotifications {
+        for name in entry.registered {
             AXObserverRemoveNotification(entry.observer, entry.application, name as CFString)
         }
         CFRunLoopRemoveSource(
@@ -92,8 +103,10 @@ final class AXObserverHub {
             kind = .focusedWindowChanged
         case kAXFocusedUIElementChangedNotification:
             kind = .focusedElementChanged
-            moveValueRegistration(to: element, entry: &entry, pid: pid)
-            entries[pid] = entry
+            if entry.kinds.contains(.valueChanged) {
+                moveValueRegistration(to: element, entry: &entry, pid: pid)
+                entries[pid] = entry
+            }
         case kAXTitleChangedNotification:
             kind = .titleChanged
         case kAXValueChangedNotification:
@@ -104,6 +117,7 @@ final class AXObserverHub {
         default:
             return
         }
+        guard entry.kinds.contains(kind) else { return }
         entry.handler(ObservedChange(pid: pid, kind: kind, menuTitle: menuTitle, ts: now()))
     }
 

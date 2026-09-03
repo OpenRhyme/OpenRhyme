@@ -18,6 +18,7 @@ final class FakeAXClient: AXReading {
     private(set) var lastReusing: ContentCache?
 
     private(set) var observing: [Int32: @MainActor (ObservedChange) -> Void] = [:]
+    private(set) var observedKinds: [Int32: Set<ObservedKind>] = [:]
     private(set) var startObservingCalls: [Int32] = []
     private(set) var stopObservingCalls: [Int32] = []
     /// Fail the next N `startObserving` calls for a pid with `.cannotComplete`.
@@ -58,7 +59,8 @@ final class FakeAXClient: AXReading {
     }
 
     func startObserving(
-        _ app: AppInfo, handler: @escaping @MainActor (ObservedChange) -> Void
+        _ app: AppInfo, kinds: Set<ObservedKind>,
+        handler: @escaping @MainActor (ObservedChange) -> Void
     ) throws {
         startObservingCalls.append(app.pid)
         if let remaining = observeFailures[app.pid], remaining > 0 {
@@ -66,11 +68,13 @@ final class FakeAXClient: AXReading {
             throw AXReadError.cannotComplete
         }
         observing[app.pid] = handler
+        observedKinds[app.pid] = kinds
     }
 
     func stopObserving(pid: Int32) {
         stopObservingCalls.append(pid)
         observing[pid] = nil
+        observedKinds[pid] = nil
     }
 
     func stopObservingAll() {
