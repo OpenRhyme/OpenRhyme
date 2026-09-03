@@ -70,4 +70,40 @@ import Testing
         #expect(config.capture.maxValueBytes == 524_288)
         #expect(config.capture.valueDebounceMs == 500)
     }
+
+    @Test func noiseReductionKeysDefaultAndParse() throws {
+        let defaults = CaptureSettings()
+        #expect(defaults.userInputWindowSeconds == 2)
+        #expect(defaults.contentMemorySeconds == 1800)
+        #expect(defaults.activationSettleMs == 200)
+        #expect(defaults.notifications == CaptureSettings.allNotifications)
+        #expect(defaults.appNotifications.isEmpty)
+
+        let url = tempURL()
+        try """
+        {"schema":1,"allowlist":[],"capture":{
+          "user_input_window_seconds":3.5,"content_memory_seconds":60,"activation_settle_ms":50,
+          "notifications":["window","title","bogus"],
+          "apps":{"com.cmuxterm.app":{"notifications":["value"],"note":"keep"}}}}
+        """.write(to: url, atomically: true, encoding: .utf8)
+        let config = try Config.load(from: url)
+        #expect(config.capture.userInputWindowSeconds == 3.5)
+        #expect(config.capture.contentMemorySeconds == 60)
+        #expect(config.capture.activationSettleMs == 50)
+        #expect(config.capture.notifications == ["window", "title"])  // unknown names dropped
+        #expect(config.capture.appNotifications == ["com.cmuxterm.app": ["value"]])
+        // value ⇒ focus, per app and globally
+        #expect(
+            config.capture.effectiveNotifications(for: "com.cmuxterm.app") == ["value", "focus"])
+        #expect(
+            config.capture.effectiveNotifications(for: "com.google.Chrome") == ["window", "title"])
+        #expect(config.capture.effectiveNotifications(for: nil) == ["window", "title"])
+
+        try config.save(to: url)
+        let again = try Config.load(from: url)
+        #expect(again.capture == config.capture)
+        #expect(
+            again.raw["capture"]?.objectValue?["apps"]?.objectValue?["com.cmuxterm.app"]?
+                .objectValue?["note"]?.stringValue == "keep")  // unknown per-app keys survive
+    }
 }
