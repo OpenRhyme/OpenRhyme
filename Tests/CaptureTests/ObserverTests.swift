@@ -37,6 +37,20 @@ import Testing
         return out
     }
 
+    /// Yields the main actor while polling `condition` until it holds or `timeout` elapses —
+    /// deterministic under CI load, instant when idle. Returns whether it held.
+    @discardableResult
+    func waitUntil(
+        timeout: Duration = .seconds(2), _ condition: () -> Bool
+    ) async -> Bool {
+        let deadline = ContinuousClock.now + timeout
+        while !condition() {
+            if ContinuousClock.now >= deadline { return false }
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        return true
+    }
+
     @Test func fakeDeliversObservedChangesToTheRegisteredHandler() throws {
         let fake = FakeAXClient()
         var received: [ObservedChange] = []
@@ -186,7 +200,7 @@ import Testing
         capturer.tick()
         capturer.handle(lifecycle: .launched(safari))
         #expect(capturer.observed.isEmpty)
-        try await Task.sleep(for: .milliseconds(60))  // two 5 ms retries
+        #expect(await waitUntil { capturer.observed == [10] })  // two 5 ms retries
         #expect(fake.startObservingCalls == [10, 10, 10])
         #expect(capturer.observed == [10])
         _ = await drain(capturer)
@@ -199,7 +213,7 @@ import Testing
         let clock = Clock()
         let capturer = try makeCapturer(fake: fake, clock: clock)
         capturer.tick()  // reconcile → observe: 1 attempt + 3 retries, then give up
-        try await Task.sleep(for: .milliseconds(60))
+        #expect(await waitUntil { fake.startObservingCalls.count == 4 })
         #expect(fake.startObservingCalls.count == 4)
         #expect(capturer.observed.isEmpty)
         capturer.tick()  // within 60 s: not retried
