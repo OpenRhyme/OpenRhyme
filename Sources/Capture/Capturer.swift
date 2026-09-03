@@ -11,7 +11,7 @@ public final class Capturer {
     public private(set) var trust: TrustState = .needsPermission
     public private(set) var state = LastKnownState()
     public private(set) var config: Config
-    /// Consecutive failed context reads per pid (reset on success). Part 2 turns this into
+    /// Consecutive failed context reads per pid (reset on success). A later slice turns this into
     /// `app.opaque` events.
     public private(set) var readFailures: [Int32: Int] = [:]
 
@@ -95,6 +95,7 @@ public final class Capturer {
         else { return }
         switch change.kind {
         case .menuItemSelected:
+            guard HeartbeatDiff.isAllowed(frontmost, config.allowlistSet) else { return }
             emit(
                 RawEvent(
                     ts: change.ts, kind: .menuItemSelected, pid: frontmost.pid,

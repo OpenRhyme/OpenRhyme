@@ -1,5 +1,5 @@
 // Capture — macOS Accessibility capture. Owns TCC trust checks and recovery, the focused
-// context reads (and, from Part 2, observers). Emits Sendable structs only; AXUIElement
+// context reads, and observers. Emits Sendable structs only; AXUIElement
 // never leaves this module. Reference: docs/accessibility-api.md.
 
 import Foundation

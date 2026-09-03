@@ -115,7 +115,7 @@ New state: `observed: Set<Int32>`, `electronEnabled: Set<Int32>`, `pendingValueR
 - **`start()`**: unchanged heartbeat loop, plus `ax.startLifecycle(handler:)`. Observers are created by the first active heartbeat's reconcile (§6.5), which also covers apps already running before the grant.
 - **`observe(app)`** (§6.2): skip if not allowlisted, not trusted, or already observed. If `ElectronSupport.isElectronBundle(app.bundleURL)` and the pid is not in `electronEnabled`: call `ax.enableElectronAccessibility(app)`, record the pid, emit `app.ax_enabled`. Then `ax.startObserving(app, handler: handle(change:))`; on throw, retry per `retryDelays`, then record `observeFailedAt[pid]` and give up until reconcile.
 - **`unobserve(pid)`**: cancel and drop the pending value refresh, `ax.stopObserving(pid)`, forget `lastContentCache[pid]`, `readFailures[pid]`, `observed`, `electronEnabled`, `observeFailedAt`.
-- **Lifecycle handler** (§6.1). **In-app change handler** (§6.3). **`refresh(pid:trigger:freshRead:)`** (§6.3).
+- **Lifecycle handler** (§6.1). **In-app change handler** (§6.3). **`refresh(trigger:freshRead:)`** (§6.3).
 - **`setTrust`**: leaving `.active` → `ax.stopObservingAll()` and clear `observed` (a disabled API delivers nothing anyway); entering `.active` → the next reconcile recreates them.
 - **`stop()`**: cancel all pending refreshes (dropped, not run — the daemon is exiting), `ax.stopObservingAll()`, `ax.stopLifecycle()`, then the existing finish.
 - **Config reload**: after a successful reload, reconcile immediately (§6.5) so an allowlist edit takes effect without waiting for a heartbeat.

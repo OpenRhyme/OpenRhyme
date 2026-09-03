@@ -411,6 +411,18 @@ import Testing
         #expect(events.last?.bundleID == "com.apple.Safari")
     }
 
+    @Test func menuSelectionIsIgnoredForANonAllowlistedFrontmostApp() async throws {
+        let fake = FakeAXClient()
+        fake.show(finder, window: WindowInfo(title: "Desktop"))  // finder is not allowlisted
+        let capturer = try makeCapturer(fake: fake)
+        capturer.tick()
+        capturer.handle(
+            change: ObservedChange(
+                pid: 30, kind: .menuItemSelected, menuTitle: "Empty Trash", ts: 9))
+        let events = await drain(capturer)
+        #expect(!events.map(\.kind).contains(.menuItemSelected))
+    }
+
     @Test func activationDropsPendingValueRefreshes() async throws {
         let fake = FakeAXClient()
         fake.show(

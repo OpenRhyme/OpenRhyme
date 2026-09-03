@@ -1,6 +1,7 @@
 import Foundation
 
-/// Spec §6.7. Detection only; enabling the AX tree is added in Part 2.
+/// Spec §6.7: Electron detection plus the enable attribute names; the write itself is
+/// `AXClient.enableElectronAccessibility`.
 public enum ElectronSupport {
     public static func isElectronBundle(_ bundleURL: URL?) -> Bool {
         guard let bundleURL else { return false }
