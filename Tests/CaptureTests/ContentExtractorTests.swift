@@ -129,4 +129,12 @@ private struct Node: TextNode {
         let r = ContentExtractor.resolveHit(from: n, cachedValue: nil, cachedSource: nil)
         #expect(r == ExtractedText(value: nil, source: nil))
     }
+
+    @Test func readoutRolesYieldNoText() {
+        let slider = Node(role: "AXSlider", value: "0 Minutes 1 Seconds of 8 Minutes 20 Seconds")
+        #expect(ContentExtractor.extract(from: slider, maxBytes: 1000) == ExtractedText())
+        #expect(
+            ContentExtractor.resolveHit(from: slider, cachedValue: "old", cachedSource: .value)
+                == ExtractedText())
+    }
 }

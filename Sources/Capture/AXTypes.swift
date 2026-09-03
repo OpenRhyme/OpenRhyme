@@ -71,6 +71,19 @@ public struct ElementInfo: Sendable, Equatable {
     }
 
     public var isSecure: Bool { subrole == Self.secureSubrole }
+
+    /// Spec 2026-09-03 §6.5: controls whose value is a numeric readout, never content.
+    public static let readoutRoles: Set<String> = [
+        "AXSlider", "AXProgressIndicator", "AXValueIndicator", "AXScrollBar",
+    ]
+    public var isReadout: Bool { role.map(Self.readoutRoles.contains) ?? false }
+
+    /// Spec §6.4: nothing identifies this element — no title, identifier, value or selection.
+    /// A secure field is never anonymous: its role-only row is a deliberate signal (MVP §6.5).
+    public var isAnonymous: Bool {
+        !isSecure && (title ?? "").isEmpty && (identifier ?? "").isEmpty
+            && (value ?? "").isEmpty && (selectedText ?? "").isEmpty
+    }
 }
 
 public struct FocusedContext: Sendable, Equatable {
@@ -120,7 +133,8 @@ public struct ContentCache: Sendable, Equatable {
         windowTitle: String?, document: String?, url: String?
     ) -> Bool {
         self.role == role && self.subrole == subrole && self.identifier == identifier
-            && self.title == title && self.windowTitle == windowTitle
+            && TitleNormalizer.normalize(self.title) == TitleNormalizer.normalize(title)
+            && TitleNormalizer.normalize(self.windowTitle) == TitleNormalizer.normalize(windowTitle)
             && self.document == document && self.url == url
     }
 }
