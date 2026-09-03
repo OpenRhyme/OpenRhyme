@@ -58,13 +58,25 @@ public final class Capturer {
         continuation.finish()
     }
 
-    /// One heartbeat. Public so tests and Part 2's observer path can drive it directly.
+    /// One heartbeat. Public so tests can drive it directly.
     public func tick() {
         reloadConfigIfChanged()
         checkTrust()
         guard trust == .active else { return }
-        heartbeat()
+        refresh(trigger: .heartbeat, freshRead: false)
         checkIdle()
+    }
+
+    /// Spec §6.3. A notification for the frontmost app triggers the shared refresh immediately;
+    /// one from a background app costs nothing. Public so the hub's handler and tests drive it.
+    public func handle(change: ObservedChange) {
+        guard trust == .active, change.pid == ax.frontmostApplication()?.pid else { return }
+        switch change.kind {
+        case .focusedWindowChanged, .focusedElementChanged, .titleChanged:
+            refresh(trigger: .observer(change.kind), freshRead: false)
+        case .valueChanged, .menuItemSelected:
+            return  // the debounce and menu paths are added with Task 6
+        }
     }
 
     private func emit(_ event: RawEvent) {
@@ -113,13 +125,16 @@ public final class Capturer {
         staleBackoff = min(staleBackoff * 2, 60)
     }
 
-    private func heartbeat() {
+    /// The read-and-diff every path shares (spec §6.3): heartbeat, activation, observer.
+    /// `freshRead` bypasses the content cache so the ladder runs again (spec §6.4).
+    private func refresh(trigger: HeartbeatDiff.Trigger, freshRead: Bool) {
         let frontmost = ax.frontmostApplication()
         var context: FocusedContext?
         if let frontmost, HeartbeatDiff.isAllowed(frontmost, config.allowlistSet) {
             do {
                 context = try ax.focusedContext(
-                    of: frontmost, reusing: lastContentCache[frontmost.pid])
+                    of: frontmost,
+                    reusing: freshRead ? nil : lastContentCache[frontmost.pid])
                 readFailures[frontmost.pid] = nil
                 staleBackoff = 5
                 if let context { lastContentCache[frontmost.pid] = ax.cache(from: context) }
@@ -139,7 +154,7 @@ public final class Capturer {
             input: HeartbeatDiff.Input(
                 frontmost: frontmost, context: context, allowlist: config.allowlistSet,
                 recordOtherApps: config.capture.recordOtherApps,
-                maxValueBytes: config.capture.maxValueBytes, now: now()))
+                maxValueBytes: config.capture.maxValueBytes, now: now(), trigger: trigger))
         for event in output.events { emit(event) }
         let idle = state.idle
         let idleSince = state.idleSince

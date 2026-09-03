@@ -67,4 +67,100 @@ import Testing
         #expect(fake.enableElectronAccessibility(safari).result == "ok")
         #expect(fake.electronCalls == [10])
     }
+
+    @Test func focusChangeTriggersAnImmediateElementFocused() async throws {
+        let fake = FakeAXClient()
+        fake.show(
+            safari, window: WindowInfo(title: "Apple"),
+            element: ElementInfo(role: "AXTextField", value: "a"))
+        let capturer = try makeCapturer(fake: fake)
+        capturer.tick()  // heartbeat: app.activated + context.snapshot
+        fake.show(
+            safari, window: WindowInfo(title: "Apple"),
+            element: ElementInfo(role: "AXTextArea", value: "b"))
+        capturer.handle(change: ObservedChange(pid: 10, kind: .focusedElementChanged, ts: 1))
+        let events = await drain(capturer)
+        #expect(
+            events.map(\.kind) == [
+                .permissionChanged, .appActivated, .contextSnapshot, .elementFocused,
+            ])
+        #expect(events[3].extra?["reason"] == "observer")
+        #expect(events[3].value == "b")
+        #expect(fake.focusedContextCalls == 2)
+    }
+
+    @Test func windowAndTitleChangesMapToTheirKinds() async throws {
+        let fake = FakeAXClient()
+        fake.show(safari, window: WindowInfo(title: "One"))
+        let capturer = try makeCapturer(fake: fake)
+        capturer.tick()
+        fake.show(safari, window: WindowInfo(title: "Two"))
+        capturer.handle(change: ObservedChange(pid: 10, kind: .titleChanged, ts: 1))
+        fake.show(safari, window: WindowInfo(title: "Three", url: "https://x"))
+        capturer.handle(change: ObservedChange(pid: 10, kind: .focusedWindowChanged, ts: 2))
+        let events = await drain(capturer)
+        #expect(
+            events.map(\.kind)
+                == [
+                    .permissionChanged, .appActivated, .contextSnapshot, .windowTitleChanged,
+                    .windowFocused,
+                ])
+        #expect(events[3].extra?["previousTitle"] == "One")
+        #expect(events[4].windowTitle == "Three")
+    }
+
+    @Test func observerThenHeartbeatDoesNotDuplicate() async throws {
+        let fake = FakeAXClient()
+        fake.show(safari, window: WindowInfo(title: "One"))
+        let capturer = try makeCapturer(fake: fake)
+        capturer.tick()
+        fake.show(safari, window: WindowInfo(title: "Two"))
+        capturer.handle(change: ObservedChange(pid: 10, kind: .titleChanged, ts: 1))
+        capturer.tick()  // sees the signature the observer path already stored
+        let events = await drain(capturer)
+        #expect(
+            events.map(\.kind) == [
+                .permissionChanged, .appActivated, .contextSnapshot, .windowTitleChanged,
+            ])
+    }
+
+    @Test func heartbeatThenLateObserverDoesNotDuplicate() async throws {
+        let fake = FakeAXClient()
+        fake.show(safari, window: WindowInfo(title: "One"))
+        let capturer = try makeCapturer(fake: fake)
+        capturer.tick()
+        fake.show(safari, window: WindowInfo(title: "Two"))
+        capturer.tick()  // the heartbeat wins the race
+        capturer.handle(change: ObservedChange(pid: 10, kind: .titleChanged, ts: 1))  // late
+        let events = await drain(capturer)
+        #expect(
+            events.map(\.kind) == [
+                .permissionChanged, .appActivated, .contextSnapshot, .contextSnapshot,
+            ])
+    }
+
+    @Test func backgroundAppChangesCostNothing() async throws {
+        let fake = FakeAXClient()
+        fake.show(safari, window: WindowInfo(title: "One"))
+        let capturer = try makeCapturer(fake: fake)
+        capturer.tick()
+        let reads = fake.focusedContextCalls
+        // TextEdit (pid 20) is in the background: no read, no event.
+        capturer.handle(change: ObservedChange(pid: 20, kind: .titleChanged, ts: 1))
+        #expect(fake.focusedContextCalls == reads)
+        let events = await drain(capturer)
+        #expect(events.map(\.kind) == [.permissionChanged, .appActivated, .contextSnapshot])
+    }
+
+    @Test func heartbeatStillCatchesAnUnnotifiedChange() async throws {
+        let fake = FakeAXClient()
+        fake.show(safari, window: WindowInfo(title: "One"))
+        let capturer = try makeCapturer(fake: fake)
+        capturer.tick()
+        fake.show(safari, window: WindowInfo(title: "Two"))  // nobody notifies
+        capturer.tick()
+        let events = await drain(capturer)
+        #expect(events.last?.kind == .contextSnapshot)
+        #expect(events.last?.extra?["reason"] == "heartbeat")
+    }
 }
