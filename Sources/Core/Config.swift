@@ -23,7 +23,7 @@ public struct PrivacySettings: Sendable, Equatable {
     ]
     public static let defaultDocumentPatterns: [String] = [
         ".env", ".env.*", "*.pem", "*.key", "*.p12", "*.keystore", "id_rsa*", "id_ed25519*",
-        "id_ecdsa*", "credentials", "credentials.*", "secrets.*", ".npmrc", ".netrc", ".pgpass",
+        "id_ecdsa*", "*credentials*", "*secrets*", ".npmrc", ".netrc", ".pgpass",
         "*/.aws/*", "*/.ssh/*", "*/.gnupg/*",
     ]
     public static let defaultWindowTitlePatterns: [String] = ["private browsing"]

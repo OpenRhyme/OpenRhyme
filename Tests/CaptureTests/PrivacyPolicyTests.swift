@@ -48,12 +48,34 @@ import Testing
         // Near-misses that must NOT be protected.
         for path in [
             "/Users/me/docs/environment.md", "/Users/me/notes/keynote.txt",
-            "/Users/me/src/Secrets.swift.md", "/Users/me/env-setup-guide.txt",
+            "/Users/me/env-setup-guide.txt",
         ] {
             #expect(
                 policy.evaluateContext(
                     bundleID: "com.microsoft.VSCode", windowTitle: "editor", document: path,
                     url: nil) == .open, "\(path)")
+        }
+    }
+
+    @Test func protectsCredentialAndSecretFilesWithAffixes() {
+        for path in [
+            "/Users/me/app/aws-credentials.json", "/Users/me/db-credentials.json",
+            "/Users/me/app/prod-secrets-2024.yaml", "/Users/me/app/secrets.yaml",
+            "/Users/me/.aws/credentials", "/Users/me/src/Secrets.swift.md",
+        ] {
+            #expect(
+                policy.evaluateContext(
+                    bundleID: "com.microsoft.VSCode", windowTitle: "editor", document: path,
+                    url: nil) == .protected(rule: "document"), "\(path)")
+        }
+    }
+
+    @Test func documentMatchingIsCaseInsensitive() {
+        for path in ["/Users/me/proj/.ENV", "/Users/me/app/Secrets.YAML", "/Users/me/K.PEM"] {
+            #expect(
+                policy.evaluateContext(
+                    bundleID: "com.microsoft.VSCode", windowTitle: "editor", document: path,
+                    url: nil) == .protected(rule: "document"), "\(path)")
         }
     }
 

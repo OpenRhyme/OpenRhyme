@@ -74,13 +74,14 @@ public struct PrivacyPolicy: Sendable, Equatable {
         return false
     }
 
-    /// A pattern matches when it matches the full path or the last component, so `.env` catches
-    /// `/Users/me/proj/.env` while `environment.md` matches neither.
+    /// A pattern matches when it matches the full path or the last component, case-insensitively,
+    /// so `.env` catches `/Users/me/proj/.env` and `/Users/me/proj/.ENV` alike, while
+    /// `environment.md` matches neither.
     func matchesDocumentPattern(_ document: String) -> Bool {
         let path = (document as NSString).expandingTildeInPath
         let name = (path as NSString).lastPathComponent
         return protectedDocumentPatterns.contains { pattern in
-            fnmatch(pattern, name, 0) == 0 || fnmatch(pattern, path, 0) == 0
+            fnmatch(pattern, name, FNM_CASEFOLD) == 0 || fnmatch(pattern, path, FNM_CASEFOLD) == 0
         }
     }
 }
