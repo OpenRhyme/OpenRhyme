@@ -6,7 +6,8 @@ import os
 /// Spec §5.1. One `AXObserver` per observed pid, its source on the main run loop (spec §4.1).
 /// A callback reads nothing except a menu item's title: it maps the notification to an
 /// `ObservedChange` and hands it to the handler. `AXUIElement` / `AXObserver` never leave here.
-/// The owner must call `stopAll()` before dropping the hub — the C callback holds it unretained.
+/// The owner must call `stopAll()` before dropping the hub — the C callback holds it unretained;
+/// `deinit` also calls it as a backstop.
 @MainActor
 final class AXObserverHub {
     typealias Handler = @MainActor (ObservedChange) -> Void
@@ -21,7 +22,7 @@ final class AXObserverHub {
 
     /// Registered on the application element. App activation is deliberately absent —
     /// `AppLifecycle` (NSWorkspace) is the single source for it, so it cannot double-fire.
-    static let applicationNotifications: [String] = [
+    private static let applicationNotifications: [String] = [
         kAXFocusedWindowChangedNotification, kAXMainWindowChangedNotification,
         kAXFocusedUIElementChangedNotification, kAXTitleChangedNotification,
         kAXMenuItemSelectedNotification,
@@ -72,6 +73,10 @@ final class AXObserverHub {
 
     func stopAll() {
         for pid in Array(entries.keys) { stop(pid: pid) }
+    }
+
+    isolated deinit {
+        stopAll()
     }
 
     /// Entered from `observerCallback`, on the main thread (spec §4.1). Minimal work only.
@@ -132,8 +137,12 @@ final class AXObserverHub {
                 entry.observer, old, kAXValueChangedNotification as CFString)
         }
         entry.focused = nil
-        try? add(kAXValueChangedNotification, on: element, entry: &entry, pid: pid)
-        entry.focused = element
+        do {
+            try add(kAXValueChangedNotification, on: element, entry: &entry, pid: pid)
+            entry.focused = element
+        } catch {
+            entry.focused = nil
+        }
     }
 
     private func focusedElement(of application: AXUIElement) -> AXUIElement? {
@@ -178,9 +187,12 @@ private func observerCallback(
 ) {
     guard let refcon else { return }
     let hub = Unmanaged<AXObserverHub>.fromOpaque(refcon).takeUnretainedValue()
+    let name = notification as String
+    // Sound: the observer's source is on CFRunLoopGetMain() (spec §4.1), so this callback runs
+    // on the main thread and `element` is only touched inside the main-actor closure —
+    // docs/accessibility-api.md §7.
     nonisolated(unsafe) let element = element
-    nonisolated(unsafe) let notification = notification
     MainActor.assumeIsolated {
-        hub.handle(element: element, notification: notification as String)
+        hub.handle(element: element, notification: name)
     }
 }
