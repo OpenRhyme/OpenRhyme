@@ -125,9 +125,10 @@ public final class AXClient: AXReading {
     // MARK: - Observers (spec §5.4)
 
     public func startObserving(
-        _ app: AppInfo, handler: @escaping @MainActor (ObservedChange) -> Void
+        _ app: AppInfo, kinds: Set<ObservedKind>,
+        handler: @escaping @MainActor (ObservedChange) -> Void
     ) throws {
-        try hub.start(pid: app.pid, handler: handler)
+        try hub.start(pid: app.pid, kinds: kinds, handler: handler)
     }
 
     public func stopObserving(pid: Int32) { hub.stop(pid: pid) }

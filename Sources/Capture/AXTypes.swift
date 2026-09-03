@@ -71,6 +71,19 @@ public struct ElementInfo: Sendable, Equatable {
     }
 
     public var isSecure: Bool { subrole == Self.secureSubrole }
+
+    /// Spec 2026-09-03 §6.5: controls whose value is a numeric readout, never content.
+    public static let readoutRoles: Set<String> = [
+        "AXSlider", "AXProgressIndicator", "AXValueIndicator", "AXScrollBar",
+    ]
+    public var isReadout: Bool { role.map(Self.readoutRoles.contains) ?? false }
+
+    /// Spec §6.4: nothing identifies this element — no title, identifier, value or selection.
+    /// A secure field is never anonymous: its role-only row is a deliberate signal (MVP §6.5).
+    public var isAnonymous: Bool {
+        !isSecure && (title ?? "").isEmpty && (identifier ?? "").isEmpty
+            && (value ?? "").isEmpty && (selectedText ?? "").isEmpty
+    }
 }
 
 public struct FocusedContext: Sendable, Equatable {
@@ -120,19 +133,36 @@ public struct ContentCache: Sendable, Equatable {
         windowTitle: String?, document: String?, url: String?
     ) -> Bool {
         self.role == role && self.subrole == subrole && self.identifier == identifier
-            && self.title == title && self.windowTitle == windowTitle
+            && TitleNormalizer.normalize(self.title) == TitleNormalizer.normalize(title)
+            && TitleNormalizer.normalize(self.windowTitle) == TitleNormalizer.normalize(windowTitle)
             && self.document == document && self.url == url
     }
 }
 
 /// Spec §5.3. What an `AXObserver` notification meant — AX-free, so the Capturer and tests never
 /// see an `AXUIElement`.
-public enum ObservedKind: String, Sendable {
+public enum ObservedKind: String, Sendable, CaseIterable {
     case focusedWindowChanged  // kAXFocusedWindowChanged and kAXMainWindowChanged
     case focusedElementChanged  // kAXFocusedUIElementChanged
     case titleChanged  // kAXTitleChanged
     case valueChanged  // kAXValueChanged, registered on the focused element
     case menuItemSelected  // kAXMenuItemSelected
+
+    /// Spec 2026-09-03 §6.7: the config name of the family this kind belongs to.
+    public var configName: String {
+        switch self {
+        case .focusedWindowChanged: return "window"
+        case .focusedElementChanged: return "focus"
+        case .titleChanged: return "title"
+        case .valueChanged: return "value"
+        case .menuItemSelected: return "menu"
+        }
+    }
+
+    /// The kinds a config set enables (`CaptureSettings.effectiveNotifications(for:)`).
+    public static func kinds(fromConfig names: Set<String>) -> Set<ObservedKind> {
+        Set(ObservedKind.allCases.filter { names.contains($0.configName) })
+    }
 }
 
 public struct ObservedChange: Sendable, Equatable {
@@ -203,10 +233,12 @@ public protocol AXReading: AnyObject {
 
     // MARK: Observers (spec §5.4)
 
-    /// Register for `app`'s in-app notifications. Throws `.cannotComplete` / `.invalidElement`
-    /// while the app's AX tree is not ready — the caller retries (spec §6.2).
+    /// Register for the given families of `app`'s in-app notifications (spec 2026-09-03 §6.7).
+    /// Throws `.cannotComplete` / `.invalidElement` while the app's AX tree is not ready — the
+    /// caller retries (spec §6.2).
     func startObserving(
-        _ app: AppInfo, handler: @escaping @MainActor (ObservedChange) -> Void) throws
+        _ app: AppInfo, kinds: Set<ObservedKind>,
+        handler: @escaping @MainActor (ObservedChange) -> Void) throws
     func stopObserving(pid: Int32)
     func stopObservingAll()
     func startLifecycle(handler: @escaping @MainActor (LifecycleEvent) -> Void)

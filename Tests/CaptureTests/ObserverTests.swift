@@ -16,8 +16,9 @@ import Testing
 
     func makeCapturer(
         fake: FakeAXClient, allow: [String] = ["com.apple.Safari", "com.apple.TextEdit"],
-        debounceMs: Int = 20, clock: Clock = Clock(),
-        retryDelays: [Duration] = [.milliseconds(5), .milliseconds(5), .milliseconds(5)]
+        debounceMs: Int = 20, settleMs: Int = 5, clock: Clock = Clock(),
+        retryDelays: [Duration] = [.milliseconds(5), .milliseconds(5), .milliseconds(5)],
+        configure: (inout Config) -> Void = { _ in }
     ) throws -> Capturer {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("orh-obs-\(UUID().uuidString)", isDirectory: true)
@@ -25,6 +26,8 @@ import Testing
         try paths.ensureDataDir()
         var config = Config(allowlist: allow)
         config.capture.valueDebounceMs = debounceMs
+        config.capture.activationSettleMs = settleMs
+        configure(&config)
         try config.save(to: paths.configURL)
         return Capturer(
             ax: fake, paths: paths, config: config, now: { clock.now }, retryDelays: retryDelays)
@@ -54,7 +57,7 @@ import Testing
     @Test func fakeDeliversObservedChangesToTheRegisteredHandler() throws {
         let fake = FakeAXClient()
         var received: [ObservedChange] = []
-        try fake.startObserving(safari) { received.append($0) }
+        try fake.startObserving(safari, kinds: Set(ObservedKind.allCases)) { received.append($0) }
         fake.deliver(ObservedChange(pid: 10, kind: .titleChanged, ts: 1))
         fake.deliver(ObservedChange(pid: 99, kind: .titleChanged, ts: 2))  // nobody observes 99
         #expect(received.map(\.pid) == [10])
@@ -68,8 +71,11 @@ import Testing
     @Test func fakeScriptsObserveFailuresLifecycleAndElectron() throws {
         let fake = FakeAXClient()
         fake.observeFailures[10] = 1
-        #expect(throws: AXReadError.self) { try fake.startObserving(safari) { _ in } }
-        try fake.startObserving(safari) { _ in }  // the second attempt succeeds
+        #expect(throws: AXReadError.self) {
+            try fake.startObserving(safari, kinds: Set(ObservedKind.allCases)) { _ in }
+        }
+        // The second attempt succeeds.
+        try fake.startObserving(safari, kinds: Set(ObservedKind.allCases)) { _ in }
         #expect(fake.startObservingCalls == [10, 10])
 
         var events: [LifecycleEvent] = []
@@ -112,6 +118,7 @@ import Testing
         capturer.tick()
         fake.show(safari, window: WindowInfo(title: "Two"))
         capturer.handle(change: ObservedChange(pid: 10, kind: .titleChanged, ts: 1))
+        #expect(await waitUntil { fake.focusedContextCalls == 2 })
         fake.show(safari, window: WindowInfo(title: "Three", url: "https://x"))
         capturer.handle(change: ObservedChange(pid: 10, kind: .focusedWindowChanged, ts: 2))
         let events = await drain(capturer)
@@ -132,6 +139,7 @@ import Testing
         capturer.tick()
         fake.show(safari, window: WindowInfo(title: "Two"))
         capturer.handle(change: ObservedChange(pid: 10, kind: .titleChanged, ts: 1))
+        #expect(await waitUntil { fake.focusedContextCalls == 2 })
         capturer.tick()  // sees the signature the observer path already stored
         let events = await drain(capturer)
         #expect(
@@ -148,6 +156,7 @@ import Testing
         fake.show(safari, window: WindowInfo(title: "Two"))
         capturer.tick()  // the heartbeat wins the race
         capturer.handle(change: ObservedChange(pid: 10, kind: .titleChanged, ts: 1))  // late
+        #expect(await waitUntil { fake.focusedContextCalls == 3 })
         let events = await drain(capturer)
         #expect(
             events.map(\.kind) == [
@@ -241,13 +250,14 @@ import Testing
         #expect(events.first { $0.kind == .appTerminated }?.bundleID == "com.apple.Safari")
     }
 
-    @Test func activationEmitsAppEventsAndSnapshotInstantly() async throws {
+    @Test func activationEmitsAppEventsAndSnapshotAfterSettle() async throws {
         let fake = FakeAXClient()
         fake.show(safari, window: WindowInfo(title: "A"))
         let capturer = try makeCapturer(fake: fake)
         capturer.tick()
         fake.show(textEdit, window: WindowInfo(title: "Doc"), element: ElementInfo(value: "hi"))
         capturer.handle(lifecycle: .activated(textEdit))
+        #expect(await waitUntil { fake.focusedContextCalls == 2 })
         let events = await drain(capturer)
         #expect(
             Array(events.map(\.kind).suffix(3))
@@ -357,7 +367,7 @@ import Testing
         #expect(changes.first?.value == "hello")
     }
 
-    @Test func focusChangeDropsAPendingValueRefresh() async throws {
+    @Test func focusChangeDropsAPendingRefresh() async throws {
         let fake = FakeAXClient()
         fake.show(
             safari, window: WindowInfo(title: "A"),
@@ -423,7 +433,7 @@ import Testing
         #expect(!events.map(\.kind).contains(.menuItemSelected))
     }
 
-    @Test func activationDropsPendingValueRefreshes() async throws {
+    @Test func activationDropsPendingRefreshes() async throws {
         let fake = FakeAXClient()
         fake.show(
             safari, window: WindowInfo(title: "A"),
@@ -435,11 +445,196 @@ import Testing
             element: ElementInfo(role: "AXTextArea", value: "hi"))
         capturer.handle(change: ObservedChange(pid: 10, kind: .valueChanged, ts: 1))
         fake.show(textEdit, window: WindowInfo(title: "Doc"))
+        let before = fake.focusedContextCalls
         capturer.handle(lifecycle: .activated(textEdit))
+        #expect(await waitUntil { fake.focusedContextCalls == before + 1 })  // settled read
         let reads = fake.focusedContextCalls
         try await Task.sleep(for: .milliseconds(150))
-        #expect(fake.focusedContextCalls == reads)  // the debounced refresh was dropped, not run
+        #expect(fake.focusedContextCalls == reads)  // the pending value refresh never ran
         let events = await drain(capturer)
         #expect(!events.map(\.kind).contains(.elementValueChanged))
+    }
+
+    @Test func ambientTitleChangeIsDroppedAndTheHeartbeatSamplesIt() async throws {
+        let fake = FakeAXClient()
+        fake.show(safari, window: WindowInfo(title: "One"))
+        let capturer = try makeCapturer(fake: fake, debounceMs: 20)
+        capturer.tick()
+        fake.idleSeconds = 30  // no input for 30 s ⇒ ambient
+        fake.show(safari, window: WindowInfo(title: "Two"))
+        let reads = fake.focusedContextCalls
+        capturer.handle(change: ObservedChange(pid: 10, kind: .titleChanged, ts: 1))
+        try await Task.sleep(for: .milliseconds(80))
+        #expect(fake.focusedContextCalls == reads)  // dropped: no read at all
+        capturer.tick()  // the safety net samples it
+        let events = await drain(capturer)
+        #expect(events.last?.kind == .contextSnapshot)
+        #expect(events.last?.extra?["reason"] == "heartbeat")
+        #expect(events.last?.windowTitle == "Two")
+    }
+
+    @Test func ambientValueChangeIsDropped() async throws {
+        let fake = FakeAXClient()
+        fake.show(
+            safari, window: WindowInfo(title: "A"),
+            element: ElementInfo(role: "AXTextArea", value: "0:01"))
+        let capturer = try makeCapturer(fake: fake, debounceMs: 20)
+        capturer.tick()
+        fake.idleSeconds = 30
+        fake.show(
+            safari, window: WindowInfo(title: "A"),
+            element: ElementInfo(role: "AXTextArea", value: "0:02"))
+        let reads = fake.focusedContextCalls
+        capturer.handle(change: ObservedChange(pid: 10, kind: .valueChanged, ts: 1))
+        try await Task.sleep(for: .milliseconds(80))
+        #expect(fake.focusedContextCalls == reads)
+        _ = await drain(capturer)
+    }
+
+    @Test func userDrivenTitleChangeIsDebouncedAndTaggedUser() async throws {
+        let fake = FakeAXClient()
+        fake.show(safari, window: WindowInfo(title: "One"))
+        let capturer = try makeCapturer(fake: fake, debounceMs: 20)
+        capturer.tick()
+        let reads = fake.focusedContextCalls
+        for title in ["Loading…", "Two"] {
+            fake.show(safari, window: WindowInfo(title: title))
+            capturer.handle(change: ObservedChange(pid: 10, kind: .titleChanged, ts: 1))
+        }
+        #expect(fake.focusedContextCalls == reads)  // still debouncing
+        #expect(await waitUntil { fake.focusedContextCalls == reads + 1 })
+        let events = await drain(capturer)
+        #expect(events.last?.kind == .windowTitleChanged)
+        #expect(events.last?.windowTitle == "Two")
+        #expect(events.last?.extra?["input"] == "user")
+    }
+
+    @Test func focusChangeRefreshesEvenWhenAmbient() async throws {
+        let fake = FakeAXClient()
+        fake.show(
+            safari, window: WindowInfo(title: "A"),
+            element: ElementInfo(role: "AXWebArea", value: "page"))
+        let capturer = try makeCapturer(fake: fake)
+        capturer.tick()
+        fake.idleSeconds = 30
+        fake.show(
+            safari, window: WindowInfo(title: "A"),
+            element: ElementInfo(role: "AXTextField", title: "Search", value: "q"))
+        capturer.handle(change: ObservedChange(pid: 10, kind: .focusedElementChanged, ts: 1))
+        let events = await drain(capturer)
+        #expect(events.last?.kind == .elementFocused)
+        #expect(events.last?.extra?["input"] == "ambient")
+    }
+
+    @Test func pendingFreshRefreshSubsumesATitleChange() async throws {
+        let fake = FakeAXClient()
+        fake.show(
+            safari, window: WindowInfo(title: "A"),
+            element: ElementInfo(role: "AXTextArea", value: "h"))
+        let capturer = try makeCapturer(fake: fake, debounceMs: 20)
+        capturer.tick()
+        let reads = fake.focusedContextCalls
+        fake.show(
+            safari, window: WindowInfo(title: "A — Edited"),
+            element: ElementInfo(role: "AXTextArea", value: "hi"))
+        capturer.handle(change: ObservedChange(pid: 10, kind: .valueChanged, ts: 1))
+        capturer.handle(change: ObservedChange(pid: 10, kind: .titleChanged, ts: 2))
+        #expect(await waitUntil { fake.focusedContextCalls == reads + 1 })
+        #expect(fake.lastReusing == nil)  // the fresh read won
+        let events = await drain(capturer)
+        #expect(events.last?.kind == .elementValueChanged)
+        #expect(events.last?.value == "hi")
+    }
+
+    @Test func activationSettleCollapsesTwoActivationsIntoOneRead() async throws {
+        let fake = FakeAXClient()
+        fake.show(safari, window: WindowInfo(title: "A"))
+        let capturer = try makeCapturer(fake: fake, settleMs: 30)
+        capturer.tick()
+        let reads = fake.focusedContextCalls
+        fake.show(textEdit, window: WindowInfo(title: "Doc"))
+        capturer.handle(lifecycle: .activated(textEdit))
+        fake.show(safari, window: WindowInfo(title: "A"))
+        capturer.handle(lifecycle: .activated(safari))  // inside the window: restarts the wait
+        #expect(await waitUntil { fake.focusedContextCalls == reads + 1 })
+        try await Task.sleep(for: .milliseconds(60))
+        #expect(fake.focusedContextCalls == reads + 1)
+        let events = await drain(capturer)
+        #expect(!events.map(\.kind).contains(.appDeactivated))  // never actually left Safari
+    }
+
+    @Test func pendingTitleRefreshIsUpgradedByAValueChange() async throws {
+        let fake = FakeAXClient()
+        fake.show(
+            safari, window: WindowInfo(title: "A"),
+            element: ElementInfo(role: "AXTextArea", value: "h"))
+        let capturer = try makeCapturer(fake: fake, debounceMs: 20)
+        capturer.tick()
+        let reads = fake.focusedContextCalls
+        fake.show(
+            safari, window: WindowInfo(title: "A — Edited"),
+            element: ElementInfo(role: "AXTextArea", value: "hi"))
+        capturer.handle(change: ObservedChange(pid: 10, kind: .titleChanged, ts: 1))
+        capturer.handle(change: ObservedChange(pid: 10, kind: .valueChanged, ts: 2))
+        #expect(await waitUntil { fake.focusedContextCalls == reads + 1 })
+        #expect(fake.lastReusing == nil)  // upgraded to a fresh read
+        let events = await drain(capturer)
+        #expect(events.last?.kind == .elementValueChanged)
+        #expect(events.last?.value == "hi")
+    }
+
+    @Test func observesOnlyTheConfiguredKindsGloballyAndPerApp() throws {
+        let fake = FakeAXClient()
+        fake.running = [safari, textEdit]
+        let capturer = try makeCapturer(fake: fake) {
+            $0.capture.notifications = ["window", "title"]
+            $0.capture.appNotifications["com.apple.TextEdit"] = ["value"]
+        }
+        capturer.tick()
+        #expect(fake.observedKinds[10] == [.focusedWindowChanged, .titleChanged])
+        #expect(fake.observedKinds[20] == [.valueChanged, .focusedElementChanged])  // value ⇒ focus
+    }
+
+    @Test func aDeliveredKindOutsideTheSetIsIgnored() async throws {
+        let fake = FakeAXClient()
+        fake.show(safari, window: WindowInfo(title: "One"))
+        let capturer = try makeCapturer(fake: fake) {
+            $0.capture.notifications = ["window", "focus"]
+        }
+        capturer.tick()
+        let reads = fake.focusedContextCalls
+        fake.show(safari, window: WindowInfo(title: "Two"))
+        capturer.handle(change: ObservedChange(pid: 10, kind: .titleChanged, ts: 1))
+        try await Task.sleep(for: .milliseconds(80))
+        #expect(fake.focusedContextCalls == reads)
+        _ = await drain(capturer)
+    }
+
+    @Test func configChangeReRegistersObserversWithTheNewKinds() throws {
+        let fake = FakeAXClient()
+        fake.running = [safari]
+        let capturer = try makeCapturer(fake: fake)
+        capturer.tick()
+        #expect(fake.observedKinds[10] == Set(ObservedKind.allCases))
+        var edited = capturer.config
+        edited.capture.appNotifications["com.apple.Safari"] = ["window"]
+        try edited.save(to: capturer.paths.configURL)
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date(timeIntervalSinceNow: 10)],
+            ofItemAtPath: capturer.paths.configURL.path)
+        capturer.tick()  // reload → reconcile → re-register with the new set
+        #expect(fake.stopObservingCalls == [10])
+        #expect(fake.startObservingCalls == [10, 10])
+        #expect(fake.observedKinds[10] == [.focusedWindowChanged])
+    }
+
+    @Test func aTypoedNotificationListStillObservesEverything() throws {
+        let fake = FakeAXClient()
+        fake.running = [safari]
+        let capturer = try makeCapturer(fake: fake) { $0.capture.notifications = ["window"] }
+        // Simulate the parse result of an all-unknown list: the loader falls back to the default.
+        #expect(capturer.config.capture.notifications == ["window"])
+        capturer.tick()
+        #expect(fake.observedKinds[10] == [.focusedWindowChanged])
     }
 }

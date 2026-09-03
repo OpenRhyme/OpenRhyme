@@ -2,6 +2,8 @@ import Core
 import Foundation
 
 /// What the heartbeat compares between ticks. Only the hash of a value is kept.
+/// `windowTitle` / `elementTitle` hold **normalized** titles (`TitleNormalizer`), so badge
+/// flicker and counter changes never register as a change.
 public struct ContextSignature: Sendable, Equatable {
     public var pid: Int32
     public var windowTitle: String?
@@ -15,13 +17,59 @@ public struct ContextSignature: Sendable, Equatable {
     public var valueHash: String?
 }
 
+/// Spec 2026-09-03 §6.1: whether the user's input caused an observer notification.
+public enum InputClass: String, Sendable {
+    case user
+    case ambient
+}
+
+/// Spec 2026-09-03 §6.3: the hashes of values recently stored for one pid, so a body already in
+/// the store is not stored again. Bounded: at most `capacity` entries; entries older than the
+/// memory window are pruned on insert.
+public struct RecentValueHashes: Sendable, Equatable {
+    public static let capacity = 32
+
+    public struct Entry: Sendable, Equatable {
+        public var hash: String
+        public var ts: Double
+    }
+
+    public private(set) var entries: [Entry] = []
+
+    public init() {}
+
+    public func contains(_ hash: String, now: Double, ttl: Double) -> Bool {
+        entries.contains { $0.hash == hash && now - $0.ts <= ttl }
+    }
+
+    public mutating func insert(_ hash: String, now: Double, ttl: Double) {
+        entries.removeAll { $0.hash == hash || now - $0.ts > ttl }
+        entries.append(Entry(hash: hash, ts: now))
+        if entries.count > Self.capacity {
+            entries.removeFirst(entries.count - Self.capacity)
+        }
+    }
+
+    var newest: Double? { entries.last?.ts }
+}
+
 public struct LastKnownState: Sendable, Equatable {
     public var frontmost: AppInfo?
     public var signature: ContextSignature?
+    /// The raw title of the last seen state, for `previousTitle`.
+    public var lastWindowTitle: String?
     public var idle = false
     public var idleSince: Double?
+    public var recentHashes: [Int32: RecentValueHashes] = [:]
 
     public init() {}
+
+    /// Forget pids whose newest stored hash is older than the memory window.
+    mutating func pruneRecentHashes(now: Double, ttl: Double) {
+        recentHashes = recentHashes.filter { _, recent in
+            recent.newest.map { now - $0 <= ttl } ?? false
+        }
+    }
 }
 
 /// Spec §6.2: pure diff of the focused context against the last known state.
@@ -55,10 +103,13 @@ public enum HeartbeatDiff {
         public var maxValueBytes: Int
         public var now: Double
         public var trigger: Trigger
+        public var input: InputClass?
+        public var contentMemorySeconds: Double
 
         public init(
             frontmost: AppInfo?, context: FocusedContext?, allowlist: Set<String>,
-            recordOtherApps: Bool, maxValueBytes: Int, now: Double, trigger: Trigger = .heartbeat
+            recordOtherApps: Bool, maxValueBytes: Int, now: Double, trigger: Trigger = .heartbeat,
+            input: InputClass? = nil, contentMemorySeconds: Double = 1800
         ) {
             self.frontmost = frontmost
             self.context = context
@@ -67,6 +118,8 @@ public enum HeartbeatDiff {
             self.maxValueBytes = maxValueBytes
             self.now = now
             self.trigger = trigger
+            self.input = input
+            self.contentMemorySeconds = contentMemorySeconds
         }
     }
 
@@ -107,29 +160,50 @@ public enum HeartbeatDiff {
             return Output(events: events, state: state)
         }
 
-        let redacted = Redaction.apply(context.element, maxValueBytes: input.maxValueBytes)
+        let element = context.element
+        let redacted = Redaction.apply(element, maxValueBytes: input.maxValueBytes)
         let hash = redacted.value.map(Hashing.sha256Hex)
-        let signature = ContextSignature(
-            pid: app.pid, windowTitle: context.window?.title, document: context.window?.document,
-            url: context.window?.url, role: context.element?.role,
-            subrole: context.element?.subrole, identifier: context.element?.identifier,
-            elementTitle: context.element?.title, selectedText: redacted.selectedText,
-            valueHash: hash)
+        var signature = ContextSignature(
+            pid: app.pid, windowTitle: TitleNormalizer.normalize(context.window?.title),
+            document: context.window?.document, url: context.window?.url, role: element?.role,
+            subrole: element?.subrole, identifier: element?.identifier,
+            elementTitle: TitleNormalizer.normalize(element?.title),
+            selectedText: redacted.selectedText, valueHash: hash)
+        // Spec §6.4: an anonymous element is transparent — the previous element carries forward.
+        if let element, element.isAnonymous, let prev = previous.signature, prev.pid == app.pid {
+            signature.role = prev.role
+            signature.subrole = prev.subrole
+            signature.identifier = prev.identifier
+            signature.elementTitle = prev.elementTitle
+            signature.selectedText = prev.selectedText
+            signature.valueHash = prev.valueHash
+        }
 
         if appChanged || signature != state.signature {
-            let valueUnchanged = hash != nil && hash == state.signature?.valueHash
+            let recentlyStored =
+                hash.map {
+                    state.recentHashes[app.pid]?.contains(
+                        $0, now: input.now, ttl: input.contentMemorySeconds) ?? false
+                } ?? false
+            let valueUnchanged =
+                hash != nil && (hash == state.signature?.valueHash || recentlyStored)
             var extra: [String: JSONValue] = ["reason": .string(input.trigger.reason)]
+            extra["fingerprint"] = .string(
+                Fingerprint.compute(
+                    bundleID: app.bundleID, windowTitle: context.window?.title,
+                    document: context.window?.document, url: context.window?.url))
+            if let inputClass = input.input { extra["input"] = .string(inputClass.rawValue) }
             if let hash {
                 extra["valueHash"] = .string(hash)
                 extra["truncated"] = .bool(redacted.truncated)
                 extra["length"] = .number(Double(redacted.length))
             }
             if valueUnchanged { extra["valueUnchanged"] = true }
-            if let textSource = context.element?.textSource {
+            if let textSource = element?.textSource {
                 extra["textSource"] = .string(textSource)
             }
             if case .observer(.titleChanged) = input.trigger,
-                let previousTitle = previous.signature?.windowTitle
+                let previousTitle = previous.lastWindowTitle
             {
                 extra["previousTitle"] = .string(previousTitle)
             }
@@ -138,12 +212,18 @@ public enum HeartbeatDiff {
                     ts: input.now, kind: input.trigger.kind, pid: app.pid, bundleID: app.bundleID,
                     appName: app.name, windowTitle: context.window?.title,
                     document: context.window?.document, url: context.window?.url,
-                    role: context.element?.role, subrole: context.element?.subrole,
-                    identifier: context.element?.identifier, elementTitle: context.element?.title,
+                    role: element?.role, subrole: element?.subrole,
+                    identifier: element?.identifier, elementTitle: element?.title,
                     value: valueUnchanged ? nil : redacted.value,
                     selectedText: redacted.selectedText, extra: extra))
+            if !valueUnchanged, let hash {
+                state.recentHashes[app.pid, default: RecentValueHashes()].insert(
+                    hash, now: input.now, ttl: input.contentMemorySeconds)
+            }
         }
         state.signature = signature
+        state.lastWindowTitle = context.window?.title
+        state.pruneRecentHashes(now: input.now, ttl: input.contentMemorySeconds)
         return Output(events: events, state: state)
     }
 

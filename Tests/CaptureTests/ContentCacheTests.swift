@@ -34,4 +34,14 @@ import Testing
         info.textSource = "value"
         #expect(info.textSource == "value")
     }
+
+    @Test func matchesAcrossBadgeFlicker() {
+        let cache = ContentCache(
+            role: "AXWebArea", windowTitle: "Doc - Audio playing - Google Chrome - Pragan",
+            url: "https://x")
+        #expect(
+            cache.matches(
+                role: "AXWebArea", subrole: nil, identifier: nil, title: nil,
+                windowTitle: "(4) Doc - Google Chrome - Pragan", document: nil, url: "https://x"))
+    }
 }

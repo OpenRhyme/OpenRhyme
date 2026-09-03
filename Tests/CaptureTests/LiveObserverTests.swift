@@ -20,7 +20,7 @@ import Testing
         #expect(client.isTrusted(prompt: false), "grant Accessibility to the terminal first")
         let original = try #require(client.frontmostApplication())
         let sink = Sink()
-        try client.startObserving(original) { change in
+        try client.startObserving(original, kinds: Set(ObservedKind.allCases)) { change in
             sink.changes.append(change)
             sink.onMainThread = sink.onMainThread && pthread_main_np() != 0
         }

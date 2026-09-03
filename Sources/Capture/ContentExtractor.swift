@@ -46,6 +46,7 @@ public enum ContentExtractor {
         if node.subrole == ElementInfo.secureSubrole {
             return ExtractedText()
         }
+        if let role = node.role, ElementInfo.readoutRoles.contains(role) { return ExtractedText() }
         // Rung 1: own value.
         if let own = try? node.ownValue(), !own.isEmpty {
             return ExtractedText(value: own, source: .value)
@@ -70,6 +71,7 @@ public enum ContentExtractor {
         from node: TextNode, cachedValue: String?, cachedSource: TextSource?
     ) -> ExtractedText {
         if node.subrole == ElementInfo.secureSubrole { return ExtractedText() }
+        if let role = node.role, ElementInfo.readoutRoles.contains(role) { return ExtractedText() }
         if let own = try? node.ownValue(), !own.isEmpty {
             return ExtractedText(value: own, source: .value)
         }
