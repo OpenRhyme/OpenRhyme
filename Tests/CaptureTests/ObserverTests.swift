@@ -16,7 +16,8 @@ import Testing
 
     func makeCapturer(
         fake: FakeAXClient, allow: [String] = ["com.apple.Safari", "com.apple.TextEdit"],
-        debounceMs: Int = 20, clock: Clock = Clock()
+        debounceMs: Int = 20, clock: Clock = Clock(),
+        retryDelays: [Duration] = [.milliseconds(5), .milliseconds(5), .milliseconds(5)]
     ) throws -> Capturer {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("orh-obs-\(UUID().uuidString)", isDirectory: true)
@@ -25,7 +26,8 @@ import Testing
         var config = Config(allowlist: allow)
         config.capture.valueDebounceMs = debounceMs
         try config.save(to: paths.configURL)
-        return Capturer(ax: fake, paths: paths, config: config, now: { clock.now })
+        return Capturer(
+            ax: fake, paths: paths, config: config, now: { clock.now }, retryDelays: retryDelays)
     }
 
     func drain(_ capturer: Capturer) async -> [RawEvent] {
@@ -162,5 +164,158 @@ import Testing
         let events = await drain(capturer)
         #expect(events.last?.kind == .contextSnapshot)
         #expect(events.last?.extra?["reason"] == "heartbeat")
+    }
+
+    @Test func launchedAllowlistedAppIsObservedAndLogged() async throws {
+        let fake = FakeAXClient()
+        let capturer = try makeCapturer(fake: fake)
+        capturer.tick()  // trust becomes active
+        capturer.handle(lifecycle: .launched(safari))
+        capturer.handle(lifecycle: .launched(finder))  // not allowlisted
+        #expect(fake.startObservingCalls == [10])
+        #expect(capturer.observed == [10])
+        let events = await drain(capturer)
+        #expect(events.first { $0.kind == .appLaunched }?.pid == 10)
+        #expect(events.filter { $0.kind == .appLaunched }.count == 1)
+    }
+
+    @Test func observerCreationRetriesWhileTheAppIsNotReady() async throws {
+        let fake = FakeAXClient()
+        fake.observeFailures[10] = 2
+        let capturer = try makeCapturer(fake: fake)
+        capturer.tick()
+        capturer.handle(lifecycle: .launched(safari))
+        #expect(capturer.observed.isEmpty)
+        try await Task.sleep(for: .milliseconds(60))  // two 5 ms retries
+        #expect(fake.startObservingCalls == [10, 10, 10])
+        #expect(capturer.observed == [10])
+        _ = await drain(capturer)
+    }
+
+    @Test func givesUpThenReconcileRetriesAfterAMinute() async throws {
+        let fake = FakeAXClient()
+        fake.observeFailures[10] = 10
+        fake.running = [safari]
+        let clock = Clock()
+        let capturer = try makeCapturer(fake: fake, clock: clock)
+        capturer.tick()  // reconcile → observe: 1 attempt + 3 retries, then give up
+        try await Task.sleep(for: .milliseconds(60))
+        #expect(fake.startObservingCalls.count == 4)
+        #expect(capturer.observed.isEmpty)
+        capturer.tick()  // within 60 s: not retried
+        #expect(fake.startObservingCalls.count == 4)
+        clock.now += 61
+        fake.observeFailures[10] = 0
+        capturer.tick()  // after 60 s: retried, succeeds
+        #expect(capturer.observed == [10])
+        _ = await drain(capturer)
+    }
+
+    @Test func terminationStopsObservingAndForgetsState() async throws {
+        let fake = FakeAXClient()
+        fake.show(safari, window: WindowInfo(title: "A"), element: ElementInfo(value: "x"))
+        fake.running = [safari]
+        let capturer = try makeCapturer(fake: fake)
+        capturer.tick()  // observed via reconcile; content cache primed
+        #expect(capturer.observed == [10])
+        capturer.handle(lifecycle: .terminated(safari))
+        #expect(fake.stopObservingCalls == [10])
+        #expect(capturer.observed.isEmpty)
+        capturer.tick()  // the cache was forgotten: this read passes no `reusing`
+        #expect(fake.lastReusing == nil)
+        let events = await drain(capturer)
+        #expect(events.first { $0.kind == .appTerminated }?.bundleID == "com.apple.Safari")
+    }
+
+    @Test func activationEmitsAppEventsAndSnapshotInstantly() async throws {
+        let fake = FakeAXClient()
+        fake.show(safari, window: WindowInfo(title: "A"))
+        let capturer = try makeCapturer(fake: fake)
+        capturer.tick()
+        fake.show(textEdit, window: WindowInfo(title: "Doc"), element: ElementInfo(value: "hi"))
+        capturer.handle(lifecycle: .activated(textEdit))
+        let events = await drain(capturer)
+        #expect(
+            Array(events.map(\.kind).suffix(3))
+                == [.appDeactivated, .appActivated, .contextSnapshot])
+        #expect(events.last?.extra?["reason"] == "observer")
+        #expect(events.last?.value == "hi")
+    }
+
+    @Test func electronAppIsEnabledOncePerPidLifetime() async throws {
+        let fake = FakeAXClient()
+        let bundle = FileManager.default.temporaryDirectory
+            .appendingPathComponent("orh-electron-\(UUID().uuidString).app", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: bundle.appendingPathComponent(
+                "Contents/Frameworks/Electron Framework.framework", isDirectory: true),
+            withIntermediateDirectories: true)
+        let code = AppInfo(
+            pid: 40, bundleID: "com.microsoft.VSCode", name: "Code", bundleURL: bundle)
+        let capturer = try makeCapturer(
+            fake: fake, allow: ["com.microsoft.VSCode", "com.apple.Safari"])
+        capturer.tick()
+        capturer.handle(lifecycle: .launched(code))
+        capturer.handle(lifecycle: .launched(code))  // already observed: no second write
+        capturer.handle(lifecycle: .launched(safari))  // not Electron: never written to
+        #expect(fake.electronCalls == [40])
+        capturer.handle(lifecycle: .terminated(code))
+        capturer.handle(lifecycle: .launched(code))  // a new lifetime of the pid: enabled again
+        #expect(fake.electronCalls == [40, 40])
+        let events = await drain(capturer)
+        let enabled = events.filter { $0.kind == .appAXEnabled }
+        #expect(enabled.count == 2)
+        #expect(enabled[0].extra?["method"] == "AXManualAccessibility")
+        #expect(enabled[0].extra?["result"] == "ok")
+        #expect(enabled[0].bundleID == "com.microsoft.VSCode")
+    }
+
+    @Test func reconcileObservesRunningAllowlistedAppsAndDropsGoneOnes() async throws {
+        let fake = FakeAXClient()
+        fake.running = [safari, finder]  // finder is not allowlisted
+        let capturer = try makeCapturer(fake: fake)
+        capturer.tick()
+        #expect(capturer.observed == [10])
+        fake.running = [textEdit]
+        capturer.tick()
+        #expect(fake.stopObservingCalls == [10])
+        #expect(capturer.observed == [20])
+        _ = await drain(capturer)
+    }
+
+    @Test func trustLossStopsObserversAndRecoveryRecreatesThem() async throws {
+        let fake = FakeAXClient()
+        fake.show(safari, window: WindowInfo(title: "A"))
+        fake.running = [safari]
+        let clock = Clock()
+        let capturer = try makeCapturer(fake: fake, clock: clock)
+        capturer.tick()
+        #expect(capturer.observed == [10])
+        fake.errors[10] = .apiDisabled
+        capturer.tick()
+        #expect(capturer.trust == .stale)
+        #expect(fake.stopObservingCalls == [10])
+        #expect(capturer.observed.isEmpty)
+        fake.errors[10] = nil
+        clock.now += 6  // past the 5 s stale backoff
+        capturer.tick()
+        #expect(capturer.trust == .active)
+        #expect(capturer.observed == [10])
+        _ = await drain(capturer)
+    }
+
+    @Test func sleepAndWakeAreRecordedAndStopTearsEverythingDown() async throws {
+        let fake = FakeAXClient()
+        fake.running = [safari]
+        let capturer = try makeCapturer(fake: fake)
+        capturer.start()  // registers the lifecycle handler
+        capturer.tick()
+        fake.deliverLifecycle(.sleep)
+        fake.deliverLifecycle(.wake)
+        let events = await drain(capturer)  // stop(): observers and lifecycle torn down
+        #expect(events.map(\.kind).contains(.systemSleep))
+        #expect(events.map(\.kind).contains(.systemWake))
+        #expect(fake.stopObservingCalls.contains(10))
+        #expect(fake.lifecycleHandler == nil)
     }
 }

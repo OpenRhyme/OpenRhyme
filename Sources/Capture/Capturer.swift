@@ -24,15 +24,25 @@ public final class Capturer {
     private var staleBackoff: Double = 5
     private var nextTrustCheck: Double = 0
     private var lastContentCache: [Int32: ContentCache] = [:]
+    /// Pids with a live observer (spec §5.5).
+    public private(set) var observed: Set<Int32> = []
+    private var electronEnabled: Set<Int32> = []
+    private var observeFailedAt: [Int32: Double] = [:]
+    private var observeRetries: [Int32: Task<Void, Never>] = [:]
+    private let retryDelays: [Duration]
+    /// Spec §6.2: a pid that exhausted its retries is re-attempted by reconcile at most this often.
+    static let reconcileRetrySeconds: Double = 60
 
     public init(
         ax: any AXReading, paths: Paths, config: Config,
-        now: @escaping @Sendable () -> Double = { Date().timeIntervalSince1970 }
+        now: @escaping @Sendable () -> Double = { Date().timeIntervalSince1970 },
+        retryDelays: [Duration] = [.seconds(1), .seconds(3), .seconds(10)]
     ) {
         self.ax = ax
         self.paths = paths
         self.config = config
         self.now = now
+        self.retryDelays = retryDelays
         self.configModified = Config.modificationDate(of: paths.configURL)
         let (stream, continuation) = AsyncStream<RawEvent>.makeStream()
         self.events = stream
@@ -42,6 +52,7 @@ public final class Capturer {
     public func start() {
         guard loop == nil else { return }
         ax.setGlobalMessagingTimeout(0.25)
+        ax.startLifecycle { [weak self] event in self?.handle(lifecycle: event) }
         loop = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self else { return }
@@ -55,6 +66,11 @@ public final class Capturer {
     public func stop() {
         loop?.cancel()
         loop = nil
+        for task in observeRetries.values { task.cancel() }
+        observeRetries = [:]
+        ax.stopObservingAll()
+        observed = []
+        ax.stopLifecycle()
         continuation.finish()
     }
 
@@ -65,6 +81,7 @@ public final class Capturer {
         guard trust == .active else { return }
         refresh(trigger: .heartbeat, freshRead: false)
         checkIdle()
+        reconcileObservers()
     }
 
     /// Spec §6.3. A notification for the frontmost app triggers the shared refresh immediately;
@@ -79,6 +96,103 @@ public final class Capturer {
         }
     }
 
+    /// Spec §6.1. Public so tests can drive it; the real source is `AppLifecycle`.
+    public func handle(lifecycle event: LifecycleEvent) {
+        switch event {
+        case .launched(let app):
+            guard HeartbeatDiff.isAllowed(app, config.allowlistSet) else { return }
+            emit(appEvent(.appLaunched, app))
+            observe(app)
+        case .terminated(let app):
+            if observed.contains(app.pid) { emit(appEvent(.appTerminated, app)) }
+            unobserve(app.pid)
+        case .activated:
+            guard trust == .active else { return }
+            refresh(trigger: .activation, freshRead: false)
+        case .sleep:
+            emit(RawEvent(ts: now(), kind: .systemSleep))
+        case .wake:
+            emit(RawEvent(ts: now(), kind: .systemWake))
+        }
+    }
+
+    private func appEvent(_ kind: EventKind, _ app: AppInfo) -> RawEvent {
+        RawEvent(ts: now(), kind: kind, pid: app.pid, bundleID: app.bundleID, appName: app.name)
+    }
+
+    /// Spec §5.5 / §6.2. Idempotent. An Electron app is enabled once per pid lifetime first.
+    func observe(_ app: AppInfo) {
+        guard trust == .active, HeartbeatDiff.isAllowed(app, config.allowlistSet),
+            !observed.contains(app.pid), observeRetries[app.pid] == nil
+        else { return }
+        if ElectronSupport.isElectronBundle(app.bundleURL), !electronEnabled.contains(app.pid) {
+            let result = ax.enableElectronAccessibility(app)
+            electronEnabled.insert(app.pid)
+            emit(
+                RawEvent(
+                    ts: now(), kind: .appAXEnabled, pid: app.pid, bundleID: app.bundleID,
+                    appName: app.name,
+                    extra: ["method": .string(result.method), "result": .string(result.result)]))
+        }
+        attemptObserve(app, attempt: 0)
+    }
+
+    private func attemptObserve(_ app: AppInfo, attempt: Int) {
+        do {
+            try ax.startObserving(app) { [weak self] change in self?.handle(change: change) }
+            observed.insert(app.pid)
+            observeFailedAt[app.pid] = nil
+            observeRetries[app.pid] = nil
+        } catch AXReadError.apiDisabled {
+            setTrust(.stale)
+            scheduleStaleRetry()
+        } catch {
+            guard attempt < retryDelays.count else {
+                logger.warning("observer for pid \(app.pid) gave up after \(attempt) retries")
+                observeFailedAt[app.pid] = now()
+                observeRetries[app.pid] = nil
+                return
+            }
+            let delay = retryDelays[attempt]
+            observeRetries[app.pid] = Task { [weak self] in
+                try? await Task.sleep(for: delay)
+                guard !Task.isCancelled, let self else { return }
+                self.observeRetries[app.pid] = nil
+                self.attemptObserve(app, attempt: attempt + 1)
+            }
+        }
+    }
+
+    func unobserve(_ pid: Int32) {
+        observeRetries[pid]?.cancel()
+        observeRetries[pid] = nil
+        if observed.contains(pid) { ax.stopObserving(pid: pid) }
+        observed.remove(pid)
+        electronEnabled.remove(pid)
+        observeFailedAt[pid] = nil
+        lastContentCache[pid] = nil
+        readFailures[pid] = nil
+    }
+
+    /// Spec §6.5. Every active heartbeat and after a config reload: observe running allowlisted
+    /// apps (initial grant, trust recovery, allowlist edits, given-up retries), drop gone ones.
+    private func reconcileObservers() {
+        guard trust == .active else { return }
+        let running = ax.runningApplications().filter {
+            HeartbeatDiff.isAllowed($0, config.allowlistSet)
+        }
+        let runningPids = Set(running.map(\.pid))
+        for app in running where !observed.contains(app.pid) {
+            if let failedAt = observeFailedAt[app.pid],
+                now() - failedAt < Self.reconcileRetrySeconds
+            {
+                continue
+            }
+            observe(app)
+        }
+        for pid in Array(observed) where !runningPids.contains(pid) { unobserve(pid) }
+    }
+
     private func emit(_ event: RawEvent) {
         continuation.yield(event)
     }
@@ -90,6 +204,7 @@ public final class Capturer {
         do {
             config = try Config.load(from: paths.configURL)
             logger.info("config reloaded: \(self.config.allowlist.count) allowlisted apps")
+            reconcileObservers()
         } catch {
             logger.error("config reload failed: \(String(describing: error))")
         }
@@ -98,6 +213,12 @@ public final class Capturer {
     private func setTrust(_ new: TrustState) {
         guard new != trust else { return }
         trust = new
+        if new != .active {
+            for task in observeRetries.values { task.cancel() }
+            observeRetries = [:]
+            ax.stopObservingAll()
+            observed = []
+        }
         emit(
             RawEvent(
                 ts: now(), kind: .permissionChanged,
