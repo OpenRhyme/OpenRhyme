@@ -42,6 +42,41 @@ import Testing
         #expect(reloaded.capture.heartbeatSeconds == 2)
     }
 
+    @Test func allUnknownNotificationNamesFallBackToDefaults() throws {
+        let url = tempURL()
+        try """
+        {"schema":1,"allowlist":[],"capture":{
+          "notifications":["windows","focuss"],
+          "apps":{"com.apple.Notes":{"notifications":["bogus"]},
+                  "com.apple.TextEdit":{"notifications":[]}}}}
+        """.write(to: url, atomically: true, encoding: .utf8)
+        let config = try Config.load(from: url)
+        // A non-empty all-unknown list is a typo, not "observe nothing".
+        #expect(config.capture.notifications == CaptureSettings.allNotifications)
+        #expect(config.capture.appNotifications["com.apple.Notes"] == nil)
+        #expect(
+            config.capture.effectiveNotifications(for: "com.apple.Notes")
+                == CaptureSettings.allNotifications)
+        // An explicit empty list still means "observe nothing".
+        #expect(config.capture.appNotifications["com.apple.TextEdit"] == [])
+        #expect(config.capture.effectiveNotifications(for: "com.apple.TextEdit") == [])
+        #expect(config.capture.unknownNotificationNames == ["bogus", "focuss", "windows"])
+    }
+
+    @Test func unknownNamesAreDiagnosticsOnlyAndDoNotAffectEqualityOrSaving() throws {
+        let url = tempURL()
+        try """
+        {"schema":1,"allowlist":[],"capture":{"notifications":["window","bogus"]}}
+        """.write(to: url, atomically: true, encoding: .utf8)
+        let config = try Config.load(from: url)
+        #expect(config.capture.notifications == ["window"])  // partial-unknown: keep the valid ones
+        #expect(config.capture.unknownNotificationNames == ["bogus"])
+        try config.save(to: url)
+        let again = try Config.load(from: url)
+        #expect(again.capture == config.capture)  // equality ignores the diagnostics field
+        #expect(again.capture.unknownNotificationNames.isEmpty)  // not persisted
+    }
+
     @Test func allowAndDenyAreIdempotent() {
         let config = Config().allowing("a").allowing("a").allowing("b").denying("zzz")
         #expect(config.allowlist == ["a", "b"])

@@ -16,10 +16,25 @@ public struct CaptureSettings: Sendable, Equatable {
     public var notifications: Set<String> = CaptureSettings.allNotifications
     /// Spec §6.7: per-app overrides by bundle id.
     public var appNotifications: [String: Set<String>] = [:]
+    /// Spec 2026-09-03 §6.7: configured names (global or per-app) that are not one of the five
+    /// known kinds — parse diagnostics only, so the daemon can warn about a likely typo. Not
+    /// saved, not compared for equality.
+    public private(set) var unknownNotificationNames: [String] = []
 
     public static let allNotifications: Set<String> = ["window", "focus", "title", "value", "menu"]
 
     public init() {}
+
+    public static func == (lhs: CaptureSettings, rhs: CaptureSettings) -> Bool {
+        lhs.heartbeatSeconds == rhs.heartbeatSeconds && lhs.idleSeconds == rhs.idleSeconds
+            && lhs.valueDebounceMs == rhs.valueDebounceMs && lhs.maxValueBytes == rhs.maxValueBytes
+            && lhs.recordOtherApps == rhs.recordOtherApps
+            && lhs.userInputWindowSeconds == rhs.userInputWindowSeconds
+            && lhs.contentMemorySeconds == rhs.contentMemorySeconds
+            && lhs.activationSettleMs == rhs.activationSettleMs
+            && lhs.notifications == rhs.notifications
+            && lhs.appNotifications == rhs.appNotifications
+    }
 
     static let keys = (
         heartbeat: "heartbeat_seconds", idle: "idle_seconds", debounce: "value_debounce_ms",
@@ -44,20 +59,38 @@ public struct CaptureSettings: Sendable, Equatable {
         if let v = json[Self.keys.settle]?.doubleValue, let exact = Int(exactly: v) {
             activationSettleMs = exact
         }
+        var unknownNames: Set<String> = []
         if let names = json[Self.keys.notifications]?.arrayValue {
-            notifications = Self.knownNames(names)
+            let (known, unknown) = Self.classify(names)
+            unknownNames.formUnion(unknown)
+            // A non-empty, all-unknown list is a typo ("windows"), not "observe nothing"; an
+            // explicit `[]` still means "observe nothing".
+            notifications = known.isEmpty && !unknown.isEmpty ? Self.allNotifications : known
         }
         if let apps = json[Self.keys.apps]?.objectValue {
             for (bundleID, value) in apps {
                 if let names = value.objectValue?[Self.keys.notifications]?.arrayValue {
-                    appNotifications[bundleID] = Self.knownNames(names)
+                    let (known, unknown) = Self.classify(names)
+                    unknownNames.formUnion(unknown)
+                    if known.isEmpty && !unknown.isEmpty {
+                        // Non-empty, all-unknown: fall back to the global default by not
+                        // recording an override for this bundle id at all.
+                    } else {
+                        appNotifications[bundleID] = known
+                    }
                 }
             }
         }
+        unknownNotificationNames = unknownNames.sorted()
     }
 
-    private static func knownNames(_ values: [JSONValue]) -> Set<String> {
-        Set(values.compactMap(\.stringValue)).intersection(allNotifications)
+    /// Splits configured notification names into the known subset and the unknown ones (spec
+    /// 2026-09-03 §6.7).
+    private static func classify(
+        _ values: [JSONValue]
+    ) -> (known: Set<String>, unknown: Set<String>) {
+        let configured = Set(values.compactMap(\.stringValue))
+        return (configured.intersection(allNotifications), configured.subtracting(allNotifications))
     }
 
     /// The set in force for a bundle id: its override if present, else the global default, with

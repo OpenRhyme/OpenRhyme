@@ -53,6 +53,7 @@ public final class Capturer {
         let (stream, continuation) = AsyncStream<RawEvent>.makeStream()
         self.events = stream
         self.continuation = continuation
+        warnAboutConfig()
     }
 
     public func start() {
@@ -299,6 +300,20 @@ public final class Capturer {
         continuation.yield(event)
     }
 
+    /// Spec 2026-09-03 §6.6 / §6.7: two misconfigurations degrade capture silently, so say so.
+    private func warnAboutConfig() {
+        if config.capture.activationSettleMs > config.capture.valueDebounceMs {
+            logger.warning(
+                "activation_settle_ms (\(self.config.capture.activationSettleMs)) exceeds value_debounce_ms (\(self.config.capture.valueDebounceMs)): a debounced refresh can land before the activated app's AX tree has settled"
+            )
+        }
+        if !config.capture.unknownNotificationNames.isEmpty {
+            logger.warning(
+                "ignoring unknown capture.notifications names: \(self.config.capture.unknownNotificationNames.joined(separator: ", "))"
+            )
+        }
+    }
+
     private func reloadConfigIfChanged() {
         let modified = Config.modificationDate(of: paths.configURL)
         guard modified != configModified else { return }
@@ -306,6 +321,7 @@ public final class Capturer {
         do {
             config = try Config.load(from: paths.configURL)
             logger.info("config reloaded: \(self.config.allowlist.count) allowlisted apps")
+            warnAboutConfig()
             reconcileObservers()
         } catch {
             logger.error("config reload failed: \(String(describing: error))")

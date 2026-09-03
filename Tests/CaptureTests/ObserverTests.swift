@@ -627,4 +627,14 @@ import Testing
         #expect(fake.startObservingCalls == [10, 10])
         #expect(fake.observedKinds[10] == [.focusedWindowChanged])
     }
+
+    @Test func aTypoedNotificationListStillObservesEverything() throws {
+        let fake = FakeAXClient()
+        fake.running = [safari]
+        let capturer = try makeCapturer(fake: fake) { $0.capture.notifications = ["window"] }
+        // Simulate the parse result of an all-unknown list: the loader falls back to the default.
+        #expect(capturer.config.capture.notifications == ["window"])
+        capturer.tick()
+        #expect(fake.observedKinds[10] == [.focusedWindowChanged])
+    }
 }
