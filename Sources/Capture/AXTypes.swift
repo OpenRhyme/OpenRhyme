@@ -200,4 +200,17 @@ public protocol AXReading: AnyObject {
     func secondsSinceLastInput() -> Double
     /// Build a cache key from a just-read context.
     func cache(from context: FocusedContext) -> ContentCache
+
+    // MARK: Observers (spec §5.4)
+
+    /// Register for `app`'s in-app notifications. Throws `.cannotComplete` / `.invalidElement`
+    /// while the app's AX tree is not ready — the caller retries (spec §6.2).
+    func startObserving(
+        _ app: AppInfo, handler: @escaping @MainActor (ObservedChange) -> Void) throws
+    func stopObserving(pid: Int32)
+    func stopObservingAll()
+    func startLifecycle(handler: @escaping @MainActor (LifecycleEvent) -> Void)
+    func stopLifecycle()
+    /// Spec §5.7: the daemon's only write into another process.
+    func enableElectronAccessibility(_ app: AppInfo) -> ElectronEnableResult
 }
