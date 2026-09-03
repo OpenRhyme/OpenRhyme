@@ -332,4 +332,102 @@ import Testing
         #expect(fake.stopObservingCalls.contains(10))
         #expect(fake.lifecycleHandler == nil)
     }
+
+    @Test func rapidValueChangesCollapseIntoOneFreshRead() async throws {
+        let fake = FakeAXClient()
+        fake.show(
+            safari, window: WindowInfo(title: "A"),
+            element: ElementInfo(role: "AXTextArea", value: "h"))
+        let capturer = try makeCapturer(fake: fake, debounceMs: 20)
+        capturer.tick()
+        let reads = fake.focusedContextCalls
+        for text in ["he", "hel", "hello"] {
+            fake.show(
+                safari, window: WindowInfo(title: "A"),
+                element: ElementInfo(role: "AXTextArea", value: text))
+            capturer.handle(change: ObservedChange(pid: 10, kind: .valueChanged, ts: 1))
+        }
+        #expect(fake.focusedContextCalls == reads)  // still debouncing: nothing read
+        #expect(await waitUntil { fake.focusedContextCalls == reads + 1 })
+        #expect(fake.focusedContextCalls == reads + 1)
+        #expect(fake.lastReusing == nil)  // the content cache was bypassed
+        let events = await drain(capturer)
+        let changes = events.filter { $0.kind == .elementValueChanged }
+        #expect(changes.count == 1)
+        #expect(changes.first?.value == "hello")
+    }
+
+    @Test func focusChangeDropsAPendingValueRefresh() async throws {
+        let fake = FakeAXClient()
+        fake.show(
+            safari, window: WindowInfo(title: "A"),
+            element: ElementInfo(role: "AXTextArea", value: "h"))
+        let capturer = try makeCapturer(fake: fake, debounceMs: 20)
+        capturer.tick()
+        fake.show(
+            safari, window: WindowInfo(title: "A"),
+            element: ElementInfo(role: "AXTextArea", value: "hi"))
+        capturer.handle(change: ObservedChange(pid: 10, kind: .valueChanged, ts: 1))
+        fake.show(
+            safari, window: WindowInfo(title: "A"),
+            element: ElementInfo(role: "AXButton", title: "OK"))
+        capturer.handle(change: ObservedChange(pid: 10, kind: .focusedElementChanged, ts: 2))
+        let reads = fake.focusedContextCalls
+        try await Task.sleep(for: .milliseconds(150))
+        #expect(fake.focusedContextCalls == reads)  // the debounced refresh was dropped, not run
+        let events = await drain(capturer)
+        #expect(!events.map(\.kind).contains(.elementValueChanged))
+        #expect(events.last?.kind == .elementFocused)
+    }
+
+    @Test func typeThenUndoIsSilent() async throws {
+        let fake = FakeAXClient()
+        fake.show(
+            safari, window: WindowInfo(title: "A"),
+            element: ElementInfo(role: "AXTextArea", value: "same"))
+        let capturer = try makeCapturer(fake: fake, debounceMs: 20)
+        capturer.tick()
+        let reads = fake.focusedContextCalls
+        capturer.handle(change: ObservedChange(pid: 10, kind: .valueChanged, ts: 1))
+        // The debounced refresh runs; the value hash is unchanged, so it emits nothing.
+        #expect(await waitUntil { fake.focusedContextCalls == reads + 1 })
+        let events = await drain(capturer)
+        #expect(events.map(\.kind) == [.permissionChanged, .appActivated, .contextSnapshot])
+    }
+
+    @Test func menuSelectionEmitsTheTitleWithoutAContextRead() async throws {
+        let fake = FakeAXClient()
+        fake.show(safari, window: WindowInfo(title: "A"))
+        let capturer = try makeCapturer(fake: fake)
+        capturer.tick()
+        let reads = fake.focusedContextCalls
+        capturer.handle(
+            change: ObservedChange(pid: 10, kind: .menuItemSelected, menuTitle: "Save", ts: 7))
+        #expect(fake.focusedContextCalls == reads)
+        let events = await drain(capturer)
+        #expect(events.last?.kind == .menuItemSelected)
+        #expect(events.last?.elementTitle == "Save")
+        #expect(events.last?.ts == 7)
+        #expect(events.last?.bundleID == "com.apple.Safari")
+    }
+
+    @Test func activationDropsPendingValueRefreshes() async throws {
+        let fake = FakeAXClient()
+        fake.show(
+            safari, window: WindowInfo(title: "A"),
+            element: ElementInfo(role: "AXTextArea", value: "h"))
+        let capturer = try makeCapturer(fake: fake, debounceMs: 20)
+        capturer.tick()
+        fake.show(
+            safari, window: WindowInfo(title: "A"),
+            element: ElementInfo(role: "AXTextArea", value: "hi"))
+        capturer.handle(change: ObservedChange(pid: 10, kind: .valueChanged, ts: 1))
+        fake.show(textEdit, window: WindowInfo(title: "Doc"))
+        capturer.handle(lifecycle: .activated(textEdit))
+        let reads = fake.focusedContextCalls
+        try await Task.sleep(for: .milliseconds(150))
+        #expect(fake.focusedContextCalls == reads)  // the debounced refresh was dropped, not run
+        let events = await drain(capturer)
+        #expect(!events.map(\.kind).contains(.elementValueChanged))
+    }
 }

@@ -3,7 +3,8 @@ import Foundation
 import os
 
 /// Drives capture on the main actor: trust state machine, config reload, the heartbeat
-/// diff, and idle detection (spec §§6.2, 6.6, 6.8). Observers are added in Part 2.
+/// diff, and idle detection (spec §§6.2, 6.6, 6.8). Observer and lifecycle paths
+/// (spec 2026-09-02-observers-design.md §6) share the same refresh.
 @MainActor
 public final class Capturer {
     public let events: AsyncStream<RawEvent>
@@ -29,6 +30,7 @@ public final class Capturer {
     private var electronEnabled: Set<Int32> = []
     private var observeFailedAt: [Int32: Double] = [:]
     private var observeRetries: [Int32: Task<Void, Never>] = [:]
+    private var pendingValueRefresh: [Int32: Task<Void, Never>] = [:]
     private let retryDelays: [Duration]
     /// Spec §6.2: a pid that exhausted its retries is re-attempted by reconcile at most this often.
     static let reconcileRetrySeconds: Double = 60
@@ -64,6 +66,7 @@ public final class Capturer {
     }
 
     public func stop() {
+        dropAllPendingValueRefreshes()
         loop?.cancel()
         loop = nil
         for task in observeRetries.values { task.cancel() }
@@ -87,13 +90,48 @@ public final class Capturer {
     /// Spec §6.3. A notification for the frontmost app triggers the shared refresh immediately;
     /// one from a background app costs nothing. Public so the hub's handler and tests drive it.
     public func handle(change: ObservedChange) {
-        guard trust == .active, change.pid == ax.frontmostApplication()?.pid else { return }
+        guard trust == .active, let frontmost = ax.frontmostApplication(),
+            change.pid == frontmost.pid
+        else { return }
         switch change.kind {
+        case .menuItemSelected:
+            emit(
+                RawEvent(
+                    ts: change.ts, kind: .menuItemSelected, pid: frontmost.pid,
+                    bundleID: frontmost.bundleID, appName: frontmost.name,
+                    elementTitle: change.menuTitle))
+        case .valueChanged:
+            scheduleValueRefresh(for: change.pid)
         case .focusedWindowChanged, .focusedElementChanged, .titleChanged:
+            dropPendingValueRefresh(for: change.pid)
             refresh(trigger: .observer(change.kind), freshRead: false)
-        case .valueChanged, .menuItemSelected:
-            return  // the debounce and menu paths are added with Task 6
         }
+    }
+
+    /// Spec §6.4. One pending refresh per pid; every value change restarts the quiet period.
+    /// The refresh bypasses the content cache — the notification says the value changed.
+    private func scheduleValueRefresh(for pid: Int32) {
+        pendingValueRefresh[pid]?.cancel()
+        let delay = Duration.milliseconds(config.capture.valueDebounceMs)
+        pendingValueRefresh[pid] = Task { [weak self] in
+            try? await Task.sleep(for: delay)
+            guard !Task.isCancelled, let self else { return }
+            self.pendingValueRefresh[pid] = nil
+            guard self.trust == .active, self.ax.frontmostApplication()?.pid == pid else {
+                return
+            }
+            self.refresh(trigger: .observer(.valueChanged), freshRead: true)
+        }
+    }
+
+    /// Spec §6.4: a pending refresh is dropped, not run, once the focused context has moved.
+    private func dropPendingValueRefresh(for pid: Int32) {
+        pendingValueRefresh[pid]?.cancel()
+        pendingValueRefresh[pid] = nil
+    }
+
+    private func dropAllPendingValueRefreshes() {
+        for pid in Array(pendingValueRefresh.keys) { dropPendingValueRefresh(for: pid) }
     }
 
     /// Spec §6.1. Public so tests can drive it; the real source is `AppLifecycle`.
@@ -107,9 +145,11 @@ public final class Capturer {
             if observed.contains(app.pid) { emit(appEvent(.appTerminated, app)) }
             unobserve(app.pid)
         case .activated:
+            dropAllPendingValueRefreshes()
             guard trust == .active else { return }
             refresh(trigger: .activation, freshRead: false)
         case .sleep:
+            dropAllPendingValueRefreshes()
             emit(RawEvent(ts: now(), kind: .systemSleep))
         case .wake:
             emit(RawEvent(ts: now(), kind: .systemWake))
@@ -153,17 +193,24 @@ public final class Capturer {
                 observeRetries[app.pid] = nil
                 return
             }
+            logger.debug(
+                "observer for pid \(app.pid) not ready (\(String(describing: error))); retry \(attempt + 1)"
+            )
             let delay = retryDelays[attempt]
             observeRetries[app.pid] = Task { [weak self] in
                 try? await Task.sleep(for: delay)
                 guard !Task.isCancelled, let self else { return }
                 self.observeRetries[app.pid] = nil
+                guard self.trust == .active,
+                    HeartbeatDiff.isAllowed(app, self.config.allowlistSet)
+                else { return }
                 self.attemptObserve(app, attempt: attempt + 1)
             }
         }
     }
 
     func unobserve(_ pid: Int32) {
+        dropPendingValueRefresh(for: pid)
         observeRetries[pid]?.cancel()
         observeRetries[pid] = nil
         if observed.contains(pid) { ax.stopObserving(pid: pid) }
@@ -214,6 +261,7 @@ public final class Capturer {
         guard new != trust else { return }
         trust = new
         if new != .active {
+            dropAllPendingValueRefreshes()
             for task in observeRetries.values { task.cancel() }
             observeRetries = [:]
             ax.stopObservingAll()
