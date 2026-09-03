@@ -1,5 +1,101 @@
 import Foundation
 
+/// Spec 2026-09-03 privacy §5.1/§6. Lists are `defaults ∪ add \ remove`, so a user extends or
+/// disables individual defaults without restating the whole list.
+public struct PrivacySettings: Sendable, Equatable {
+    public var enabled: Bool = true
+    public var entropyRedaction: Bool = true
+    public var protectedBundleIDs: Set<String> = Self.defaultBundleIDs
+    public var protectedURLPatterns: [String] = Self.defaultURLPatterns
+    public var protectedDocumentPatterns: [String] = Self.defaultDocumentPatterns
+    public var protectedWindowTitlePatterns: [String] = Self.defaultWindowTitlePatterns
+    public var credentialFieldPatterns: [String] = Self.defaultCredentialFieldPatterns
+
+    public static let defaultBundleIDs: Set<String> = [
+        "com.1password.1password", "com.1password.7", "com.agilebits.onepassword7",
+        "com.bitwarden.desktop", "com.lastpass.LastPass", "in.sinew.Enpass-Desktop",
+        "com.dashlane.Dashlane", "com.apple.keychainaccess",
+    ]
+    public static let defaultURLPatterns: [String] = [
+        "1password.com", "bitwarden.com", "lastpass.com", "dashlane.com", "/ui/vault/",
+        "://vault.", "/settings/credentials", "/trust-credentials", "/admin/credentials",
+        "/iam-admin/serviceaccounts", "/apikeys",
+    ]
+    public static let defaultDocumentPatterns: [String] = [
+        ".env", ".env.*", "*.pem", "*.key", "*.p12", "*.keystore", "id_rsa*", "id_ed25519*",
+        "id_ecdsa*", "credentials", "credentials.*", "secrets.*", ".npmrc", ".netrc", ".pgpass",
+        "*/.aws/*", "*/.ssh/*", "*/.gnupg/*",
+    ]
+    public static let defaultWindowTitlePatterns: [String] = ["private browsing"]
+    public static let defaultCredentialFieldPatterns: [String] = [
+        "password", "passwd", "secret", "token", "api key", "api_key", "apikey", "private key",
+        "passphrase", "otp", "2fa", "mfa code",
+    ]
+
+    public init() {}
+
+    static let keys = (
+        enabled: "enabled", entropy: "entropy_redaction", bundles: "protected_bundle_ids",
+        urls: "protected_url_patterns", documents: "protected_document_patterns",
+        titles: "protected_window_title_patterns", fields: "credential_field_patterns",
+        add: "add", remove: "remove"
+    )
+
+    init(json: [String: JSONValue]) {
+        self.init()
+        if let v = json[Self.keys.enabled]?.boolValue { enabled = v }
+        if let v = json[Self.keys.entropy]?.boolValue { entropyRedaction = v }
+        protectedBundleIDs = Set(
+            Self.resolve(Array(Self.defaultBundleIDs), json[Self.keys.bundles]))
+        protectedURLPatterns = Self.resolve(Self.defaultURLPatterns, json[Self.keys.urls])
+        protectedDocumentPatterns = Self.resolve(
+            Self.defaultDocumentPatterns, json[Self.keys.documents])
+        protectedWindowTitlePatterns = Self.resolve(
+            Self.defaultWindowTitlePatterns, json[Self.keys.titles])
+        credentialFieldPatterns = Self.resolve(
+            Self.defaultCredentialFieldPatterns, json[Self.keys.fields])
+    }
+
+    /// `defaults ∪ add \ remove`, order-stable: defaults first, then additions.
+    private static func resolve(_ defaults: [String], _ value: JSONValue?) -> [String] {
+        guard let object = value?.objectValue else { return defaults }
+        let add = object[keys.add]?.arrayValue?.compactMap(\.stringValue) ?? []
+        let remove = Set(object[keys.remove]?.arrayValue?.compactMap(\.stringValue) ?? [])
+        var out = defaults.filter { !remove.contains($0) }
+        for item in add where !out.contains(item) && !remove.contains(item) { out.append(item) }
+        return out
+    }
+
+    /// Only the user's deltas are written back, so a future change to a default list reaches
+    /// existing installs instead of being frozen into their config.
+    func merged(into json: [String: JSONValue]) -> [String: JSONValue] {
+        var out = json
+        out[Self.keys.enabled] = .bool(enabled)
+        out[Self.keys.entropy] = .bool(entropyRedaction)
+        out[Self.keys.bundles] = Self.delta(
+            Array(Self.defaultBundleIDs), Array(protectedBundleIDs))
+        out[Self.keys.urls] = Self.delta(Self.defaultURLPatterns, protectedURLPatterns)
+        out[Self.keys.documents] = Self.delta(
+            Self.defaultDocumentPatterns, protectedDocumentPatterns)
+        out[Self.keys.titles] = Self.delta(
+            Self.defaultWindowTitlePatterns, protectedWindowTitlePatterns)
+        out[Self.keys.fields] = Self.delta(
+            Self.defaultCredentialFieldPatterns, credentialFieldPatterns)
+        return out
+    }
+
+    private static func delta(_ defaults: [String], _ current: [String]) -> JSONValue {
+        let defaultSet = Set(defaults)
+        let currentSet = Set(current)
+        return .object([
+            keys.add: .array(
+                current.filter { !defaultSet.contains($0) }.sorted().map(JSONValue.string)),
+            keys.remove: .array(
+                defaults.filter { !currentSet.contains($0) }.sorted().map(JSONValue.string)),
+        ])
+    }
+}
+
 public struct CaptureSettings: Sendable, Equatable {
     public var heartbeatSeconds: Double = 5
     public var idleSeconds: Double = 120
@@ -12,6 +108,8 @@ public struct CaptureSettings: Sendable, Equatable {
     public var contentMemorySeconds: Double = 1800
     /// Spec §6.6: how long to wait after an app activation before reading the focused context.
     public var activationSettleMs: Int = 200
+    /// Spec 2026-09-03 privacy §7: days of history to retain before purge; 0 means unset/keep all.
+    public var retentionDays: Int = 0
     /// Spec §6.7: the global notification set. Names: window, focus, title, value, menu.
     public var notifications: Set<String> = CaptureSettings.allNotifications
     /// Spec §6.7: per-app overrides by bundle id.
@@ -32,6 +130,7 @@ public struct CaptureSettings: Sendable, Equatable {
             && lhs.userInputWindowSeconds == rhs.userInputWindowSeconds
             && lhs.contentMemorySeconds == rhs.contentMemorySeconds
             && lhs.activationSettleMs == rhs.activationSettleMs
+            && lhs.retentionDays == rhs.retentionDays
             && lhs.notifications == rhs.notifications
             && lhs.appNotifications == rhs.appNotifications
     }
@@ -40,7 +139,8 @@ public struct CaptureSettings: Sendable, Equatable {
         heartbeat: "heartbeat_seconds", idle: "idle_seconds", debounce: "value_debounce_ms",
         maxValue: "max_value_bytes", others: "record_other_apps",
         inputWindow: "user_input_window_seconds", contentMemory: "content_memory_seconds",
-        settle: "activation_settle_ms", notifications: "notifications", apps: "apps"
+        settle: "activation_settle_ms", retention: "retention_days",
+        notifications: "notifications", apps: "apps"
     )
 
     init(json: [String: JSONValue]) {
@@ -58,6 +158,9 @@ public struct CaptureSettings: Sendable, Equatable {
         if let v = json[Self.keys.contentMemory]?.doubleValue { contentMemorySeconds = v }
         if let v = json[Self.keys.settle]?.doubleValue, let exact = Int(exactly: v) {
             activationSettleMs = exact
+        }
+        if let v = json[Self.keys.retention]?.doubleValue, let exact = Int(exactly: v) {
+            retentionDays = exact
         }
         var unknownNames: Set<String> = []
         if let names = json[Self.keys.notifications]?.arrayValue {
@@ -111,6 +214,7 @@ public struct CaptureSettings: Sendable, Equatable {
         out[Self.keys.inputWindow] = .number(userInputWindowSeconds)
         out[Self.keys.contentMemory] = .number(contentMemorySeconds)
         out[Self.keys.settle] = .number(Double(activationSettleMs))
+        out[Self.keys.retention] = .number(Double(retentionDays))
         out[Self.keys.notifications] = .array(notifications.sorted().map(JSONValue.string))
         var apps = json[Self.keys.apps]?.objectValue ?? [:]
         for (bundleID, names) in appNotifications {
@@ -129,14 +233,16 @@ public struct Config: Sendable, Equatable {
 
     public var allowlist: [String]
     public var capture: CaptureSettings
+    public var privacy: PrivacySettings
     public var raw: [String: JSONValue]
 
     public init(
         allowlist: [String] = [], capture: CaptureSettings = CaptureSettings(),
-        raw: [String: JSONValue] = [:]
+        privacy: PrivacySettings = PrivacySettings(), raw: [String: JSONValue] = [:]
     ) {
         self.allowlist = allowlist
         self.capture = capture
+        self.privacy = privacy
         self.raw = raw
     }
 
@@ -166,7 +272,8 @@ public struct Config: Sendable, Equatable {
         let raw = value.objectValue ?? [:]
         let allowlist = raw["allowlist"]?.arrayValue?.compactMap(\.stringValue) ?? []
         let capture = CaptureSettings(json: raw["capture"]?.objectValue ?? [:])
-        return Config(allowlist: allowlist, capture: capture, raw: raw)
+        let privacy = PrivacySettings(json: raw["privacy"]?.objectValue ?? [:])
+        return Config(allowlist: allowlist, capture: capture, privacy: privacy, raw: raw)
     }
 
     public func save(to url: URL) throws {
@@ -174,6 +281,7 @@ public struct Config: Sendable, Equatable {
         out["schema"] = .number(Double(Self.schema))
         out["allowlist"] = .array(allowlist.map(JSONValue.string))
         out["capture"] = .object(capture.merged(into: raw["capture"]?.objectValue ?? [:]))
+        out["privacy"] = .object(privacy.merged(into: raw["privacy"]?.objectValue ?? [:]))
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
         let data = try encoder.encode(JSONValue.object(out))

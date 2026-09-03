@@ -141,4 +141,43 @@ import Testing
             again.raw["capture"]?.objectValue?["apps"]?.objectValue?["com.cmuxterm.app"]?
                 .objectValue?["note"]?.stringValue == "keep")  // unknown per-app keys survive
     }
+
+    @Test func privacyDefaultsAndAddRemoveSemantics() throws {
+        let defaults = PrivacySettings()
+        #expect(defaults.enabled)
+        #expect(defaults.entropyRedaction)
+        #expect(defaults.protectedBundleIDs.contains("com.1password.1password"))
+        #expect(defaults.protectedDocumentPatterns.contains(".env"))
+        #expect(CaptureSettings().retentionDays == 0)
+
+        let url = tempURL()
+        try """
+        {"schema":1,"allowlist":[],
+         "capture":{"retention_days":30},
+         "privacy":{"entropy_redaction":false,
+           "protected_bundle_ids":{"add":["com.example.Vault"],"remove":["com.apple.keychainaccess"]},
+           "protected_document_patterns":{"add":["*.secret"],"remove":[".npmrc"]}}}
+        """.write(to: url, atomically: true, encoding: .utf8)
+        let config = try Config.load(from: url)
+        #expect(config.capture.retentionDays == 30)
+        #expect(!config.privacy.entropyRedaction)
+        #expect(config.privacy.protectedBundleIDs.contains("com.example.Vault"))
+        #expect(config.privacy.protectedBundleIDs.contains("com.1password.1password"))
+        #expect(!config.privacy.protectedBundleIDs.contains("com.apple.keychainaccess"))
+        #expect(config.privacy.protectedDocumentPatterns.contains("*.secret"))
+        #expect(!config.privacy.protectedDocumentPatterns.contains(".npmrc"))
+
+        try config.save(to: url)
+        let again = try Config.load(from: url)
+        #expect(again.privacy == config.privacy)
+        #expect(again.capture.retentionDays == 30)
+    }
+
+    @Test func privacyCanBeDisabledWholesale() throws {
+        let url = tempURL()
+        try #"{"schema":1,"allowlist":[],"privacy":{"enabled":false}}"#
+            .write(to: url, atomically: true, encoding: .utf8)
+        let config = try Config.load(from: url)
+        #expect(!config.privacy.enabled)
+    }
 }
