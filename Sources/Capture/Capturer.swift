@@ -324,7 +324,8 @@ public final class Capturer {
             input: HeartbeatDiff.Input(
                 frontmost: frontmost, context: context, allowlist: config.allowlistSet,
                 recordOtherApps: config.capture.recordOtherApps,
-                maxValueBytes: config.capture.maxValueBytes, now: now(), trigger: trigger))
+                maxValueBytes: config.capture.maxValueBytes, now: now(), trigger: trigger,
+                contentMemorySeconds: config.capture.contentMemorySeconds))
         for event in output.events { emit(event) }
         let idle = state.idle
         let idleSince = state.idleSince

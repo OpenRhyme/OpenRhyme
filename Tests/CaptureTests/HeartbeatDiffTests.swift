@@ -319,4 +319,79 @@ import Testing
         #expect(s2.events[0].subrole == "AXSecureTextField")
         #expect(s2.events[0].value == nil)
     }
+
+    @Test func recentlyStoredBodyIsNotStoredAgain() {
+        let a = ElementInfo(role: "AXWebArea", value: "page A body")
+        let b = ElementInfo(role: "AXWebArea", value: "page B body")
+        let s1 = HeartbeatDiff.compute(
+            previous: LastKnownState(),
+            input: input(safari, window: WindowInfo(title: "A"), element: a, now: 100))
+        let s2 = HeartbeatDiff.compute(
+            previous: s1.state,
+            input: input(safari, window: WindowInfo(title: "B"), element: b, now: 110))
+        let s3 = HeartbeatDiff.compute(
+            previous: s2.state,
+            input: input(safari, window: WindowInfo(title: "A"), element: a, now: 120))
+        #expect(s1.events.last?.value == "page A body")
+        #expect(s2.events.last?.value == "page B body")
+        #expect(s3.events.map(\.kind) == [.contextSnapshot])
+        #expect(s3.events[0].value == nil)
+        #expect(s3.events[0].extra?["valueUnchanged"] == true)
+        #expect(s3.events[0].extra?["valueHash"] == .string(Hashing.sha256Hex("page A body")))
+    }
+
+    @Test func memoryExpiresAfterTheWindow() {
+        let a = ElementInfo(role: "AXWebArea", value: "page A body")
+        let b = ElementInfo(role: "AXWebArea", value: "page B body")
+        let s1 = HeartbeatDiff.compute(
+            previous: LastKnownState(),
+            input: input(safari, window: WindowInfo(title: "A"), element: a, now: 100))
+        let s2 = HeartbeatDiff.compute(
+            previous: s1.state,
+            input: input(safari, window: WindowInfo(title: "B"), element: b, now: 110))
+        let s3 = HeartbeatDiff.compute(
+            previous: s2.state,
+            input: input(safari, window: WindowInfo(title: "A"), element: a, now: 100 + 1801))
+        #expect(s3.events[0].value == "page A body")
+        #expect(s3.events[0].extra?["valueUnchanged"] == nil)
+    }
+
+    @Test func memoryIsBoundedAtThirtyTwoPerPid() {
+        var state = LastKnownState()
+        for i in 0..<33 {
+            state =
+                HeartbeatDiff.compute(
+                    previous: state,
+                    input: input(
+                        safari, window: WindowInfo(title: "T\(i)"),
+                        element: ElementInfo(role: "AXWebArea", value: "body \(i)"),
+                        now: Double(100 + i))
+                ).state
+        }
+        #expect(state.recentHashes[10]?.entries.count == 32)
+        // "body 1" is still remembered; "body 0" was evicted by the 33rd insert.
+        let back1 = HeartbeatDiff.compute(
+            previous: state,
+            input: input(
+                safari, window: WindowInfo(title: "T1"),
+                element: ElementInfo(role: "AXWebArea", value: "body 1"), now: 200))
+        #expect(back1.events[0].value == nil)
+        let back0 = HeartbeatDiff.compute(
+            previous: back1.state,
+            input: input(
+                safari, window: WindowInfo(title: "T0"),
+                element: ElementInfo(role: "AXWebArea", value: "body 0"), now: 201))
+        #expect(back0.events[0].value == "body 0")
+    }
+
+    @Test func memoryIsPerPid() {
+        let body = ElementInfo(role: "AXWebArea", value: "shared body")
+        let s1 = HeartbeatDiff.compute(
+            previous: LastKnownState(),
+            input: input(safari, window: WindowInfo(title: "A"), element: body, now: 100))
+        let s2 = HeartbeatDiff.compute(
+            previous: s1.state,
+            input: input(textEdit, window: WindowInfo(title: "A"), element: body, now: 101))
+        #expect(s2.events.last?.value == "shared body")
+    }
 }
