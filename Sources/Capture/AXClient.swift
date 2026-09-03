@@ -2,6 +2,7 @@ import AppKit
 import ApplicationServices
 import Core
 import Foundation
+import os
 
 extension AppInfo {
     public init(running app: NSRunningApplication) {
@@ -16,6 +17,10 @@ extension AppInfo {
 @MainActor
 public final class AXClient: AXReading {
     public init() {}
+
+    private let hub = AXObserverHub()
+    private let lifecycle = AppLifecycle()
+    private let logger = Logger(subsystem: "org.openrhyme.engine", category: "ax")
 
     public func isTrusted(prompt: Bool) -> Bool {
         // The literal key avoids importing the non-Sendable `kAXTrustedCheckOptionPrompt` global.
@@ -115,6 +120,48 @@ public final class AXClient: AXReading {
     public func secondsSinceLastInput() -> Double {
         CGEventSource.secondsSinceLastEventType(
             .combinedSessionState, eventType: CGEventType(rawValue: ~0)!)
+    }
+
+    // MARK: - Observers (spec §5.4)
+
+    public func startObserving(
+        _ app: AppInfo, handler: @escaping @MainActor (ObservedChange) -> Void
+    ) throws {
+        try hub.start(pid: app.pid, handler: handler)
+    }
+
+    public func stopObserving(pid: Int32) { hub.stop(pid: pid) }
+
+    public func stopObservingAll() { hub.stopAll() }
+
+    public func startLifecycle(handler: @escaping @MainActor (LifecycleEvent) -> Void) {
+        lifecycle.start(handler: handler)
+    }
+
+    public func stopLifecycle() { lifecycle.stop() }
+
+    /// Spec §5.7. `AXManualAccessibility` first; on `attributeUnsupported` fall back to
+    /// `AXEnhancedUserInterface`. Logged: it is the only write the daemon makes into another
+    /// process.
+    public func enableElectronAccessibility(_ app: AppInfo) -> ElectronEnableResult {
+        let application = AXUIElementCreateApplication(app.pid)
+        for method in ElectronSupport.enableAttributes {
+            let error = AXUIElementSetAttributeValue(
+                application, method as CFString, kCFBooleanTrue)
+            switch error {
+            case .success:
+                logger.info("set \(method) on pid \(app.pid) (\(app.bundleID ?? "?"))")
+                return ElectronEnableResult(method: method, result: "ok")
+            case .attributeUnsupported:
+                continue
+            default:
+                logger.warning(
+                    "\(method) on pid \(app.pid) failed: AXError \(error.rawValue)")
+                return ElectronEnableResult(method: method, result: "failed")
+            }
+        }
+        return ElectronEnableResult(
+            method: ElectronSupport.enableAttributes.last ?? "", result: "unsupported")
     }
 
     // MARK: - Reads (internal so AXClient+Inspect can reuse them)
