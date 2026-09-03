@@ -26,6 +26,27 @@ public struct LastKnownState: Sendable, Equatable {
 
 /// Spec §6.2: pure diff of the focused context against the last known state.
 public enum HeartbeatDiff {
+    /// Spec §5.6: what caused this diff. It decides only the kind and `reason` of the emitted
+    /// focused-context event; the dedup rule is identical for every trigger (spec §6.6).
+    public enum Trigger: Sendable, Equatable {
+        case heartbeat
+        case activation
+        case observer(ObservedKind)
+
+        var kind: EventKind {
+            switch self {
+            case .heartbeat, .activation: return .contextSnapshot
+            case .observer(.focusedElementChanged): return .elementFocused
+            case .observer(.focusedWindowChanged): return .windowFocused
+            case .observer(.titleChanged): return .windowTitleChanged
+            case .observer(.valueChanged): return .elementValueChanged
+            case .observer(.menuItemSelected): return .contextSnapshot  // never reaches compute
+            }
+        }
+
+        var reason: String { self == .heartbeat ? "heartbeat" : "observer" }
+    }
+
     public struct Input: Sendable {
         public var frontmost: AppInfo?
         public var context: FocusedContext?
@@ -33,10 +54,11 @@ public enum HeartbeatDiff {
         public var recordOtherApps: Bool
         public var maxValueBytes: Int
         public var now: Double
+        public var trigger: Trigger
 
         public init(
             frontmost: AppInfo?, context: FocusedContext?, allowlist: Set<String>,
-            recordOtherApps: Bool, maxValueBytes: Int, now: Double
+            recordOtherApps: Bool, maxValueBytes: Int, now: Double, trigger: Trigger = .heartbeat
         ) {
             self.frontmost = frontmost
             self.context = context
@@ -44,6 +66,7 @@ public enum HeartbeatDiff {
             self.recordOtherApps = recordOtherApps
             self.maxValueBytes = maxValueBytes
             self.now = now
+            self.trigger = trigger
         }
     }
 
@@ -95,7 +118,7 @@ public enum HeartbeatDiff {
 
         if appChanged || signature != state.signature {
             let valueUnchanged = hash != nil && hash == state.signature?.valueHash
-            var extra: [String: JSONValue] = ["reason": "heartbeat"]
+            var extra: [String: JSONValue] = ["reason": .string(input.trigger.reason)]
             if let hash {
                 extra["valueHash"] = .string(hash)
                 extra["truncated"] = .bool(redacted.truncated)
@@ -105,9 +128,14 @@ public enum HeartbeatDiff {
             if let textSource = context.element?.textSource {
                 extra["textSource"] = .string(textSource)
             }
+            if case .observer(.titleChanged) = input.trigger,
+                let previousTitle = previous.signature?.windowTitle
+            {
+                extra["previousTitle"] = .string(previousTitle)
+            }
             events.append(
                 RawEvent(
-                    ts: input.now, kind: .contextSnapshot, pid: app.pid, bundleID: app.bundleID,
+                    ts: input.now, kind: input.trigger.kind, pid: app.pid, bundleID: app.bundleID,
                     appName: app.name, windowTitle: context.window?.title,
                     document: context.window?.document, url: context.window?.url,
                     role: context.element?.role, subrole: context.element?.subrole,

@@ -125,6 +125,51 @@ public struct ContentCache: Sendable, Equatable {
     }
 }
 
+/// Spec §5.3. What an `AXObserver` notification meant — AX-free, so the Capturer and tests never
+/// see an `AXUIElement`.
+public enum ObservedKind: String, Sendable {
+    case focusedWindowChanged  // kAXFocusedWindowChanged and kAXMainWindowChanged
+    case focusedElementChanged  // kAXFocusedUIElementChanged
+    case titleChanged  // kAXTitleChanged
+    case valueChanged  // kAXValueChanged, registered on the focused element
+    case menuItemSelected  // kAXMenuItemSelected
+}
+
+public struct ObservedChange: Sendable, Equatable {
+    public var pid: Int32
+    public var kind: ObservedKind
+    /// `menuItemSelected` only: the item's title, read once in the callback.
+    public var menuTitle: String?
+    public var ts: Double
+
+    public init(pid: Int32, kind: ObservedKind, menuTitle: String? = nil, ts: Double) {
+        self.pid = pid
+        self.kind = kind
+        self.menuTitle = menuTitle
+        self.ts = ts
+    }
+}
+
+/// Spec §5.2. `NSWorkspace` app lifecycle and power events.
+public enum LifecycleEvent: Sendable, Equatable {
+    case launched(AppInfo)
+    case terminated(AppInfo)
+    case activated(AppInfo)
+    case sleep
+    case wake
+}
+
+/// Spec §5.7. Outcome of the one write the daemon performs into another process.
+public struct ElectronEnableResult: Sendable, Equatable {
+    public var method: String  // "AXManualAccessibility" | "AXEnhancedUserInterface"
+    public var result: String  // "ok" | "unsupported" | "failed"
+
+    public init(method: String, result: String) {
+        self.method = method
+        self.result = result
+    }
+}
+
 public enum TrustState: String, Sendable {
     case needsPermission
     case active
