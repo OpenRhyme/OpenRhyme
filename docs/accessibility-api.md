@@ -149,6 +149,8 @@ The 37 notifications are listed in `AXNotificationConstants.h`; the ones that ma
 | `kAXMenuOpenedNotification` / `kAXMenuClosedNotification` / `kAXMenuItemSelectedNotification` | explicit user actions (Save, Build, Commit…) |
 | `kAXLayoutChangedNotification`, `kAXRowCountChangedNotification`, `kAXSheetCreatedNotification` | noisy; probably ignore |
 
+**As shipped** (`Sources/Capture/AXObserverHub.swift`, `AppLifecycle.swift`, `Capturer.swift`): one `AXObserver` per allowlisted pid, its source added to `CFRunLoopGetMain()`; the hub tracks the registered set and tears an observer down on `stopObserving(pid:)` / `stopObservingAll()`. Registered on the app element: focused/main window changed, focused UI element changed, title changed, menu item selected; `kAXValueChangedNotification` is re-registered to follow the focused element rather than being fixed to one control. App activation is not an `AXObserver` notification at all — it comes from `NSWorkspace` via `AppLifecycle`, alongside launch/terminate/sleep/wake. Every notification funnels into the same read-and-diff `refresh` the heartbeat uses, tagged with the trigger kind (`element.focused`, `window.focused`, `window.title_changed`, `element.value_changed`) and `extra.reason: "observer"`; value changes are debounced by `capture.value_debounce_ms` and, once the quiet period elapses, bypass the content cache so the content ladder (§6.2) re-runs. A notification for a pid that is not frontmost costs no read at all — the callback returns immediately. The 5 s heartbeat keeps running underneath as the safety net for apps or changes an observer never announced.
+
 ### 5.2 Input events (`CGEventTap`)
 
 ```swift
@@ -210,6 +212,7 @@ Qt, Java/Swing without the AX bridge, OpenGL/Metal games, Flutter (partial), man
 - Observer / tap callbacks are C function pointers that run on the run-loop thread they were registered on.
 - Working pattern (chosen for the MVP, see `docs/superpowers/specs/2026-09-01-mvp-capture-engine-design.md` §3): **do all AX and `NSWorkspace` work on the main thread**. The daemon runs `RunLoop.main`; observers' sources attach there; the capture object is `@MainActor`. In a headless daemon the main thread is otherwise idle, so this is the simplest model the compiler can enforce. Hand results outward through an `AsyncStream<RawEvent>`, where `RawEvent` is a plain `Sendable` struct (pid, bundle id, kind, strings, timestamps) — never an `AXUIElement`. A dedicated capture thread behind a custom global actor remains an option if the main thread ever gets other duties (a menu-bar UI).
 - If a wrapper must cross the boundary anyway, mark it `@unchecked Sendable` and document the invariant (touched only on the capture thread). Use `Unmanaged` for `refcon`.
+- Verified 2026-09-02 (macOS 26.5, Swift 6 async `main`): the main `CFRunLoop` is pumped while the daemon `await`s its signal, so observer sources on `CFRunLoopGetMain()` fire with no explicit pump.
 
 ## 8. The capture loop, in prose
 

@@ -77,6 +77,8 @@ make run                                     # starts the daemon in the foregrou
 
 `events` now carries the visible on-screen text in `value` for every captured app, and `extra.textSource` says which extraction path produced it.
 
+Capture is event-driven: app, window, element and title changes, typing (debounced), menu selections and sleep/wake are recorded the moment they happen; the 5 s heartbeat is only the safety net.
+
 The daemon needs the **Accessibility** grant. When launched from a terminal, macOS attributes the request to the terminal app, so grant it to Terminal/iTerm (System Settings → Privacy & Security → Accessibility). `openrhyme inspect` shows exactly what the daemon can see for the frontmost app. Ad-hoc-signed `swift build` binaries lose the grant on every rebuild — read `docs/accessibility-api.md` §2 before trying.
 
 ## Roadmap and open questions

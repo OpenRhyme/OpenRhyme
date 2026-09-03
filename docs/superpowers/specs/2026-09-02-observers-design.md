@@ -90,7 +90,7 @@ public struct ObservedChange: Sendable, Equatable {
     public var ts: Double
 }
 public enum LifecycleEvent: Sendable, Equatable {
-    case launched(AppInfo), terminated(pid: Int32), activated(AppInfo), sleep, wake
+    case launched(AppInfo), terminated(AppInfo), activated(AppInfo), sleep, wake
 }
 public struct ElectronEnableResult: Sendable, Equatable {
     public var method: String     // "AXManualAccessibility" | "AXEnhancedUserInterface"
@@ -145,8 +145,8 @@ Detection is unchanged. Enabling: `AXUIElementSetAttributeValue(appElement, "AXM
 
 ### 6.1 Lifecycle events
 - `launched(app)`: if allowlisted, emit `app.launched` and `observe(app)`.
-- `terminated(pid)`: if observed, emit `app.terminated` and `unobserve(pid)`; also drop `lastContentCache[pid]` even if it was never observed.
-- `activated(app)`: drop any pending value refresh for the previously frontmost pid (§6.4), then `refresh(pid: app.pid, trigger: .activation, freshRead: false)`. `HeartbeatDiff`'s `appChanged` branch emits `app.deactivated` for the old allowlisted app and `app.activated` for the new one (or, with `record_other_apps`, for a non-allowlisted one with no content), followed by the new context's `context.snapshot` when the app is allowlisted. Non-allowlisted apps are never read (MVP §6.1) — `refresh` returns after the app events.
+- `terminated(app)`: if observed, emit `app.terminated` (the event keeps the app's bundle id/name) and `unobserve(app.pid)`; also drop `lastContentCache[app.pid]` even if it was never observed.
+- `activated(app)`: drop any pending value refresh for the previously frontmost pid (§6.4), then `refresh(trigger: .activation, freshRead: false)`. `HeartbeatDiff`'s `appChanged` branch emits `app.deactivated` for the old allowlisted app and `app.activated` for the new one (or, with `record_other_apps`, for a non-allowlisted one with no content), followed by the new context's `context.snapshot` when the app is allowlisted. Non-allowlisted apps are never read (MVP §6.1) — `refresh` returns after the app events.
 - `sleep`: drop pending value refreshes, emit `system.sleep`. `wake`: emit `system.wake`. (Observers are left in place; macOS keeps them valid across sleep.)
 
 ### 6.2 Observer creation and retries
@@ -157,12 +157,12 @@ Detection is unchanged. Enabling: `AXUIElementSetAttributeValue(appElement, "AXM
 1. **Background apps cost nothing.** If `change.pid != ax.frontmostApplication()?.pid`, return. (A background tab finishing a load changes a title; it is not what the user is looking at. The next activation or heartbeat picks up the new title when it matters.)
 2. `menuItemSelected`: emit `menu.item_selected` directly — app fields from the frontmost `AppInfo`, `elementTitle = change.menuTitle` — and return. No context read.
 3. `valueChanged`: debounce (§6.4) and return.
-4. Any other kind: drop a pending value refresh for this pid (§6.4), then `refresh(pid:, trigger: .observer(kind), freshRead: false)`.
+4. Any other kind: drop a pending value refresh for this pid (§6.4), then `refresh(trigger: .observer(kind), freshRead: false)`.
 
-`refresh(pid:trigger:freshRead:)` is the heartbeat body factored out: guard `trust == .active`; `frontmost = ax.frontmostApplication()`; if allowlisted read `ax.focusedContext(of: frontmost, reusing: freshRead ? nil : lastContentCache[frontmost.pid])` — the cache is keyed on `frontmost.pid`; the `pid` argument only names the debounce/bookkeeping slot — update the cache, map `apiDisabled` → stale exactly as today; then `HeartbeatDiff.compute(previous: state, input: …, trigger:)`, emit, and merge state as today. The heartbeat itself becomes `refresh(pid: frontmost.pid, trigger: .heartbeat, freshRead: false)` plus idle and reconcile.
+`refresh(trigger:freshRead:)` is the heartbeat body factored out: guard `trust == .active`; `frontmost = ax.frontmostApplication()`; if allowlisted read `ax.focusedContext(of: frontmost, reusing: freshRead ? nil : lastContentCache[frontmost.pid])` — the cache is keyed on `frontmost.pid`, re-read from `ax.frontmostApplication()` on every call rather than passed in — update the cache, map `apiDisabled` → stale exactly as today; then `HeartbeatDiff.compute(previous: state, input: …, trigger:)`, emit, and merge state as today. The heartbeat itself becomes `refresh(trigger: .heartbeat, freshRead: false)` plus idle and reconcile.
 
 ### 6.4 Value debounce
-Per frontmost pid, `valueChanged` starts (or restarts) a main-actor `Task` that sleeps `capture.value_debounce_ms` and then runs `refresh(pid:, trigger: .observer(.valueChanged), freshRead: true)`. `freshRead: true` bypasses the content cache: the notification itself says the value changed, so the ladder runs again and a web editor's contenteditable is re-harvested — at most once per debounce window, which bounds the cost of any storm. A refresh whose final value hashes equal to the previous one emits nothing (existing `valueUnchanged` dedup), so type-then-undo is silent.
+Per frontmost pid, `valueChanged` starts (or restarts) a main-actor `Task` that sleeps `capture.value_debounce_ms` and then runs `refresh(trigger: .observer(.valueChanged), freshRead: true)`. `freshRead: true` bypasses the content cache: the notification itself says the value changed, so the ladder runs again and a web editor's contenteditable is re-harvested — at most once per debounce window, which bounds the cost of any storm. A refresh whose final value hashes equal to the previous one emits nothing (existing `valueUnchanged` dedup), so type-then-undo is silent.
 
 A pending refresh is **dropped** (cancelled, not run) when focus leaves the element or the app is switched (the focused context has already moved, so a read now would attribute the wrong element), on `terminated`, on `sleep`, and on `stop`. Accepted loss: at most the trailing `value_debounce_ms` of keystrokes before a fast switch (§2).
 
