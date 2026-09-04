@@ -17,6 +17,7 @@ import Testing
         #expect(data?["allowlist"] as? [String] == [])
         #expect(data?["opaque_apps"] as? [String] == [])
         #expect(["active", "needsPermission"].contains(data?["state"] as? String ?? ""))
+        #expect(data?["retention_days"] as? Int == 0)
     }
 
     @Test func reportsCountsAndLiveDaemon() async throws {
@@ -27,7 +28,10 @@ import Testing
         await store.close()
         // The test process itself stands in for a live daemon.
         try PIDFile(url: dir.appendingPathComponent("daemon.pid")).acquire()
-        try Config(allowlist: ["com.a"]).save(to: dir.appendingPathComponent("config.json"))
+        var settings = CaptureSettings()
+        settings.retentionDays = 14
+        try Config(allowlist: ["com.a"], capture: settings).save(
+            to: dir.appendingPathComponent("config.json"))
 
         let result = try CLIRunner.run(["status", "--json"], env: ["OPENRHYME_DATA_DIR": dir.path])
         #expect(result.status == 0, "\(result.stderr)")
@@ -37,8 +41,11 @@ import Testing
         #expect(data?["event_count"] as? Int == 2)
         #expect(data?["last_event_ts"] as? Double == 9)
         #expect(data?["allowlist"] as? [String] == ["com.a"])
+        // Privacy fix round 1: `retention_days` was reported by no command before this.
+        #expect(data?["retention_days"] as? Int == 14)
 
         let human = try CLIRunner.run(["status"], env: ["OPENRHYME_DATA_DIR": dir.path])
         #expect(human.stdout.contains("daemon:   running"))
+        #expect(human.stdout.contains("retention: 14 day(s)"))
     }
 }

@@ -198,4 +198,152 @@ import Testing
         #expect(result.stdout.contains(#""value":"token [redacted:aws-key] end""#))
         #expect(!result.stdout.contains("AKIAQQQQWWWWEEEERRRR"))
     }
+
+    // MARK: - J8 (privacy fix round 1): read-time redaction covers every text-bearing column,
+    // not just `value`/`selected_text` — a credential is just as real leaked in a URL query
+    // string as it is in `value`.
+
+    @Test func eventsRedactsSecretsInURLDocumentWindowTitleAndElementTitle() async throws {
+        let dir = try CLIRunner.tempDataDir()
+        let store = try EventStore(url: dir.appendingPathComponent("events.sqlite"))
+        try await store.append(
+            RawEvent(
+                ts: 100, kind: .contextSnapshot, bundleID: "com.apple.Safari",
+                windowTitle: "token AKIAQQQQWWWWEEEERRRR here",
+                document: "/tmp/AKIAQQQQWWWWEEEERRRR.txt",
+                url: "https://ex.com/?token=AKIAQQQQWWWWEEEERRRR",
+                elementTitle: "field AKIAQQQQWWWWEEEERRRR"))
+        await store.close()
+        let env = ["OPENRHYME_DATA_DIR": dir.path]
+
+        let result = try CLIRunner.run(["events", "--since", "0", "--json"], env: env)
+        #expect(result.status == 0, "\(result.stderr)")
+        let rows = try #require(
+            (try CLIRunner.json(result.stdout)["data"] as? [String: Any])?["events"]
+                as? [[String: Any]])
+        let row = try #require(rows.first)
+        #expect(row["window_title"] as? String == "token [redacted:aws-key] here")
+        #expect(row["document"] as? String == "/tmp/[redacted:aws-key].txt")
+        #expect(row["url"] as? String == "https://ex.com/?token=[redacted:aws-key]")
+        #expect(row["element_title"] as? String == "field [redacted:aws-key]")
+    }
+
+    /// Read-time redaction only ever changes what is *returned* — it must never write back to
+    /// the store, so capture-time artifacts computed from the original, unredacted text
+    /// (`extra.fingerprint`, a value hash) are unaffected by what a later read redacts.
+    @Test func redactionAtReadTimeNeverAffectsStoredFingerprintOrHashArtifacts() async throws {
+        let dir = try CLIRunner.tempDataDir()
+        let store = try EventStore(url: dir.appendingPathComponent("events.sqlite"))
+        try await store.append(
+            RawEvent(
+                ts: 100, kind: .contextSnapshot, bundleID: "com.apple.TextEdit",
+                value: "token AKIAQQQQWWWWEEEERRRR end",
+                extra: ["fingerprint": "abc123", "valueHash": "def456"]))
+        await store.close()
+        let env = ["OPENRHYME_DATA_DIR": dir.path]
+
+        let result = try CLIRunner.run(["events", "--since", "0", "--json"], env: env)
+        #expect(result.status == 0, "\(result.stderr)")
+        let rows = try #require(
+            (try CLIRunner.json(result.stdout)["data"] as? [String: Any])?["events"]
+                as? [[String: Any]])
+        let row = try #require(rows.first)
+        #expect(row["value"] as? String == "token [redacted:aws-key] end")
+        let extra = try #require(row["extra"] as? [String: Any])
+        #expect(extra["fingerprint"] as? String == "abc123")
+        #expect(extra["valueHash"] as? String == "def456")
+
+        // And the store itself was never touched — reading again (or exporting) sees the exact
+        // same raw, unredacted bytes underneath.
+        let raw = try EventStore(
+            url: dir.appendingPathComponent("events.sqlite"), readOnly: true)
+        let stored = try await raw.query(EventQuery(since: 0))
+        await raw.close()
+        #expect(stored.first?.value == "token AKIAQQQQWWWWEEEERRRR end")
+    }
+
+    // MARK: - J9 (privacy fix round 1): a corrupt config.json must fail closed with a mapped
+    // error, not leak a raw DecodingError as an unmapped internal_error.
+
+    @Test func eventsWithACorruptConfigFailsClosedWithAMappedError() async throws {
+        let dir = try CLIRunner.tempDataDir()
+        try Data("{not valid json".utf8).write(to: dir.appendingPathComponent("config.json"))
+        let result = try CLIRunner.run(
+            ["events", "--since", "0", "--json"], env: ["OPENRHYME_DATA_DIR": dir.path])
+        #expect(result.status != 0)
+        let error = try #require(
+            (try CLIRunner.json(result.stdout)["error"] as? [String: Any]))
+        #expect(error["code"] as? String == "config_invalid")
+        #expect(!(error["message"] as? String ?? "").isEmpty)
+    }
+
+    @Test func exportWithACorruptConfigFailsClosedWithAMappedError() async throws {
+        let dir = try CLIRunner.tempDataDir()
+        try Data("{not valid json".utf8).write(to: dir.appendingPathComponent("config.json"))
+        let result = try CLIRunner.run(
+            ["export", "--since", "0"], env: ["OPENRHYME_DATA_DIR": dir.path])
+        #expect(result.status != 0)
+        #expect(
+            result.stderr.contains("config_invalid") || result.stderr.contains("not valid JSON"))
+    }
+
+    // MARK: - J11: `--max-value-chars` help says "0 = full" — a negative value is not a third
+    // meaning and must be rejected, not silently treated as full.
+
+    @Test func negativeMaxValueCharsIsRejected() throws {
+        let result = try CLIRunner.run(
+            ["events", "--since", "0", "--max-value-chars", "-1", "--json"])
+        #expect(result.status == 2 || result.status == 64)  // ArgumentParser uses EX_USAGE
+    }
+
+    // MARK: - J12: when `--max-value-chars` actually cuts `value`/`selected_text`,
+    // `extra.valueTruncated` says so — the default (2000, matching the brief's own Step 3 and
+    // the MCP's pre-existing default, `docs/superpowers/plans/2026-09-03-privacy-controls.md`
+    // and `openrhyme-mcp/src/openrhyme_mcp/server.py`) is unchanged by this round.
+
+    @Test func truncatedValueIsFlaggedInExtraButAFullValueIsNot() async throws {
+        let dir = try CLIRunner.tempDataDir()
+        let store = try EventStore(url: dir.appendingPathComponent("events.sqlite"))
+        try await store.append(
+            RawEvent(
+                ts: 100, kind: .contextSnapshot, bundleID: "com.apple.TextEdit",
+                value: String(repeating: "x", count: 20)))
+        try await store.append(
+            RawEvent(
+                ts: 200, kind: .contextSnapshot, bundleID: "com.apple.TextEdit",
+                value: "short"))
+        await store.close()
+        let env = ["OPENRHYME_DATA_DIR": dir.path]
+
+        let result = try CLIRunner.run(
+            ["events", "--since", "0", "--max-value-chars", "10", "--json"], env: env)
+        #expect(result.status == 0, "\(result.stderr)")
+        let rows = try #require(
+            (try CLIRunner.json(result.stdout)["data"] as? [String: Any])?["events"]
+                as? [[String: Any]])
+        #expect(rows.count == 2)
+        let truncatedRow = try #require(rows.first { ($0["value"] as? String)?.count == 10 })
+        #expect((truncatedRow["extra"] as? [String: Any])?["valueTruncated"] as? Bool == true)
+        let shortRow = try #require(rows.first { $0["value"] as? String == "short" })
+        #expect((shortRow["extra"] as? [String: Any])?["valueTruncated"] == nil)
+    }
+
+    @Test func maxValueCharsZeroNeverFlagsTruncationEvenForALongValue() async throws {
+        let dir = try CLIRunner.tempDataDir()
+        let store = try EventStore(url: dir.appendingPathComponent("events.sqlite"))
+        try await store.append(
+            RawEvent(
+                ts: 100, kind: .contextSnapshot, bundleID: "com.apple.TextEdit",
+                value: String(repeating: "x", count: 5000)))
+        await store.close()
+        let env = ["OPENRHYME_DATA_DIR": dir.path]
+
+        let result = try CLIRunner.run(
+            ["events", "--since", "0", "--max-value-chars", "0", "--json"], env: env)
+        #expect(result.status == 0, "\(result.stderr)")
+        let rows = try #require(
+            (try CLIRunner.json(result.stdout)["data"] as? [String: Any])?["events"]
+                as? [[String: Any]])
+        #expect((rows.first?["extra"] as? [String: Any])?["valueTruncated"] == nil)
+    }
 }

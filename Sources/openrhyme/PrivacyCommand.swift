@@ -40,6 +40,9 @@ struct PrivacyCommand: AsyncParsableCommand {
         /// way the field means the same thing in both states — "how many rows match these rule
         /// definitions" — and `enabled` alone tells you whether that's real or hypothetical.
         let storedRowsMatchingRules: Int
+        /// Privacy fix round 1: `capture.retention_days` was reported by no command before this
+        /// — `0` means unset/keep everything.
+        let retentionDays: Int
 
         // Top-level CLI `--json` output is snake_case (see `status`/`events`/`apps`), unlike the
         // event `extra` blob (camelCase) — these two conventions are already both established
@@ -57,6 +60,7 @@ struct PrivacyCommand: AsyncParsableCommand {
             case frontmostApp = "frontmost_app"
             case frontmostVerdict = "frontmost_verdict"
             case storedRowsMatchingRules = "stored_rows_matching_rules"
+            case retentionDays = "retention_days"
         }
     }
 
@@ -86,7 +90,8 @@ struct PrivacyCommand: AsyncParsableCommand {
                 credentialFieldPatterns: policy.credentialFieldPatterns,
                 frontmostApp: frontmostApp,
                 frontmostVerdict: frontmostVerdict,
-                storedRowsMatchingRules: storedRowsMatchingRules)
+                storedRowsMatchingRules: storedRowsMatchingRules,
+                retentionDays: config.capture.retentionDays)
         }
     }
 
@@ -157,6 +162,9 @@ struct PrivacyCommand: AsyncParsableCommand {
         }
         lines.append("data dir: \(result.dataDir)")
         lines.append("db path:  \(result.dbPath)")
+        lines.append(
+            "retention: \(result.retentionDays > 0 ? "\(result.retentionDays) day(s)" : "off (keep forever)")"
+        )
         // Unconditional, not just when something already matches: the one thing a first-time
         // reader must learn before trusting this report at all. Deliberately does NOT name
         // `purge --apply-rules` here (H2, privacy fix round 3): that command is only a safe,

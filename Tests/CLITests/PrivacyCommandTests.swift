@@ -38,6 +38,8 @@ import Testing
                 == true)
         #expect((data["credential_field_patterns"] as? [String])?.contains("password") == true)
         #expect(data["stored_rows_matching_rules"] as? Int == 1)
+        // Privacy fix round 1: `retention_days` was reported by no command before this.
+        #expect(data["retention_days"] as? Int == 0)
         // G4: a report that doesn't say which store it describes can't be acted on with
         // confidence — must match `status`'s spelling exactly.
         #expect(data["data_dir"] as? String == dir.path)
@@ -198,5 +200,22 @@ import Testing
         #expect(result.status == 0, "\(result.stderr)")
         let after = try Data(contentsOf: dbURL)
         #expect(before == after, "openrhyme privacy must open the store read-only")
+    }
+
+    /// Privacy fix round 1: `retention_days` was reported by no command before this.
+    @Test func humanOutputReportsRetentionDays() async throws {
+        let dir = try CLIRunner.tempDataDir()
+        var settings = CaptureSettings()
+        settings.retentionDays = 7
+        try Config(capture: settings).save(to: dir.appendingPathComponent("config.json"))
+
+        let result = try CLIRunner.run(["privacy"], env: ["OPENRHYME_DATA_DIR": dir.path])
+        #expect(result.status == 0, "\(result.stderr)")
+        #expect(result.stdout.contains("retention: 7 day(s)"))
+
+        let json = try CLIRunner.run(
+            ["privacy", "--json"], env: ["OPENRHYME_DATA_DIR": dir.path])
+        let data = try #require(try CLIRunner.json(json.stdout)["data"] as? [String: Any])
+        #expect(data["retention_days"] as? Int == 7)
     }
 }

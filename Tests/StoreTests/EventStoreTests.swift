@@ -144,6 +144,56 @@ import Testing
         #expect(try await store.count() == 1)
     }
 
+    /// Privacy fix round 1, J5: the automatic retention sweep exempts kinds that carry no
+    /// captured user content — `excludingKinds` is what makes that possible without a second
+    /// deletion code path.
+    @Test func deleteEventsOlderThanExcludesTheGivenKinds() async throws {
+        let store = try EventStore(url: tempURL())
+        try await store.append(event(1, .daemonStarted))
+        try await store.append(event(1, .daemonStopped))
+        try await store.append(event(1, .permissionChanged))
+        try await store.append(event(1, .contextSnapshot))
+        #expect(try await store.count() == 4)
+
+        let removed = try await store.deleteEvents(
+            olderThan: 100,
+            excludingKinds: [.daemonStarted, .daemonStopped, .permissionChanged])
+        #expect(removed == 1, "only the non-exempt kind should be removed")
+
+        let remaining = try await store.query(EventQuery(since: 0))
+        #expect(
+            Set(remaining.map(\.kind)) == [.daemonStarted, .daemonStopped, .permissionChanged])
+    }
+
+    /// `deleteEvents(olderThan:)` without `excludingKinds` (the default) is unchanged — every
+    /// existing caller (and this same test file's `deletesByIDAndByAge`) must keep deleting
+    /// everything older, exemption-free.
+    @Test func deleteEventsOlderThanWithNoExclusionsDeletesEverythingOlder() async throws {
+        let store = try EventStore(url: tempURL())
+        try await store.append(event(1, .daemonStarted))
+        try await store.append(event(1, .contextSnapshot))
+        #expect(try await store.deleteEvents(olderThan: 100) == 2)
+        #expect(try await store.count() == 0)
+    }
+
+    /// `countEvents(olderThan:excludingKinds:)` previews exactly what
+    /// `deleteEvents(olderThan:excludingKinds:)` would remove, without removing it — used by the
+    /// retention safeguard to report what a first sweep would delete before skipping it.
+    @Test func countEventsOlderThanMatchesWhatDeleteWouldRemoveAndChangesNothing() async throws {
+        let store = try EventStore(url: tempURL())
+        try await store.append(event(1, .daemonStarted))
+        try await store.append(event(1, .contextSnapshot))
+        try await store.append(event(1, .contextSnapshot))
+
+        let count = try await store.countEvents(olderThan: 100, excludingKinds: [.daemonStarted])
+        #expect(count == 2)
+        #expect(try await store.count() == 3, "counting must not delete anything")
+
+        let removed = try await store.deleteEvents(
+            olderThan: 100, excludingKinds: [.daemonStarted])
+        #expect(removed == count, "the preview count must match the real deletion exactly")
+    }
+
     @Test func databaseFileIsOwnerOnly() async throws {
         let url = tempURL()
         let store = try EventStore(url: url)

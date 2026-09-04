@@ -110,6 +110,12 @@ public struct CaptureSettings: Sendable, Equatable {
     public var activationSettleMs: Int = 200
     /// Spec 2026-09-03 privacy §7: days of history to retain before purge; 0 means unset/keep all.
     public var retentionDays: Int = 0
+    /// Privacy fix round 1, safeguard: set when `capture.retention_days` is present in the raw
+    /// config but not parseable as a whole number (e.g. a quoted string like `"30"`) — a
+    /// silent-corruption trap otherwise: the setting falls back to its default (`0`, off)
+    /// without any signal that it did. Parse diagnostic only (like `unknownNotificationNames`):
+    /// not saved, not compared for equality.
+    public private(set) var retentionDaysInvalid: Bool = false
     /// Spec §6.7: the global notification set. Names: window, focus, title, value, menu.
     public var notifications: Set<String> = CaptureSettings.allNotifications
     /// Spec §6.7: per-app overrides by bundle id.
@@ -159,8 +165,12 @@ public struct CaptureSettings: Sendable, Equatable {
         if let v = json[Self.keys.settle]?.doubleValue, let exact = Int(exactly: v) {
             activationSettleMs = exact
         }
-        if let v = json[Self.keys.retention]?.doubleValue, let exact = Int(exactly: v) {
-            retentionDays = exact
+        if let raw = json[Self.keys.retention] {
+            if let v = raw.doubleValue, let exact = Int(exactly: v) {
+                retentionDays = exact
+            } else {
+                retentionDaysInvalid = true
+            }
         }
         var unknownNames: Set<String> = []
         if let names = json[Self.keys.notifications]?.arrayValue {
@@ -227,6 +237,16 @@ public struct CaptureSettings: Sendable, Equatable {
     }
 }
 
+/// Thrown by `Config.load` when `config.json` exists but is not valid JSON. Distinct from
+/// "missing" (not an error — `Config()` defaults apply): a config the engine cannot parse must
+/// fail closed with a clear, mapped CLI error (privacy fix round 1, J9) rather than being
+/// silently treated as "no privacy settings configured", which is what falling through to the
+/// defaults here would otherwise mean.
+public struct ConfigParseError: Error, Sendable {
+    public let url: URL
+    public let reason: String
+}
+
 /// `config.json` (spec §8). Unknown keys survive a load/save round trip via `raw`.
 public struct Config: Sendable, Equatable {
     public static let schema = 1
@@ -268,7 +288,16 @@ public struct Config: Sendable, Equatable {
     public static func load(from url: URL) throws -> Config {
         guard FileManager.default.fileExists(atPath: url.path) else { return Config() }
         let data = try Data(contentsOf: url)
-        let value = try JSONDecoder().decode(JSONValue.self, from: data)
+        let value: JSONValue
+        do {
+            value = try JSONDecoder().decode(JSONValue.self, from: data)
+        } catch {
+            // Privacy fix round 1, J9: a config that exists but fails to parse must fail
+            // closed, loudly — not be silently treated as "no privacy settings configured"
+            // (which is what letting `Config()`'s defaults apply here would mean) and not leak
+            // a raw `DecodingError` through as an unmapped `internal_error`.
+            throw ConfigParseError(url: url, reason: String(describing: error))
+        }
         let raw = value.objectValue ?? [:]
         let allowlist = raw["allowlist"]?.arrayValue?.compactMap(\.stringValue) ?? []
         let capture = CaptureSettings(json: raw["capture"]?.objectValue ?? [:])

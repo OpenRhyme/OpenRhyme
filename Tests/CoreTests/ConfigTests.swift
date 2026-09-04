@@ -173,6 +173,43 @@ import Testing
         #expect(again.capture.retentionDays == 30)
     }
 
+    /// Privacy fix round 1, safeguard: a string-typed `retention_days` (e.g. `"30"`) is a
+    /// silent-corruption trap otherwise — it fails to parse, falls back to the `0` default, and
+    /// nothing signals that it did. `retentionDaysInvalid` is that signal.
+    @Test func stringTypedRetentionDaysFallsBackToZeroAndIsFlaggedInvalid() throws {
+        let url = tempURL()
+        try #"{"schema":1,"allowlist":[],"capture":{"retention_days":"30"}}"#
+            .write(to: url, atomically: true, encoding: .utf8)
+        let config = try Config.load(from: url)
+        #expect(config.capture.retentionDays == 0)
+        #expect(config.capture.retentionDaysInvalid)
+    }
+
+    @Test func validRetentionDaysIsNotFlaggedInvalid() throws {
+        let url = tempURL()
+        try #"{"schema":1,"allowlist":[],"capture":{"retention_days":30}}"#
+            .write(to: url, atomically: true, encoding: .utf8)
+        let config = try Config.load(from: url)
+        #expect(config.capture.retentionDays == 30)
+        #expect(!config.capture.retentionDaysInvalid)
+    }
+
+    @Test func missingRetentionDaysIsNotFlaggedInvalid() throws {
+        let config = try Config.load(from: tempURL())
+        #expect(!config.capture.retentionDaysInvalid, "unset is not the same as invalid")
+    }
+
+    /// Privacy fix round 1, J9: a `config.json` that exists but fails to parse must fail closed
+    /// with a distinct, mapped error — not be silently treated as "no privacy settings
+    /// configured" (which is what falling through to `Config()`'s defaults would mean).
+    @Test func malformedJSONThrowsConfigParseErrorRatherThanFallingBackToDefaults() throws {
+        let url = tempURL()
+        try "{not valid json".write(to: url, atomically: true, encoding: .utf8)
+        #expect(throws: ConfigParseError.self) {
+            try Config.load(from: url)
+        }
+    }
+
     @Test func privacyCanBeDisabledWholesale() throws {
         let url = tempURL()
         try #"{"schema":1,"allowlist":[],"privacy":{"enabled":false}}"#

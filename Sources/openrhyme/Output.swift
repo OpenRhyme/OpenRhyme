@@ -55,6 +55,18 @@ struct CLIError: Error {
     static func usage(_ message: String) -> CLIError {
         CLIError(code: "usage", message: message, exitCode: 2)
     }
+
+    /// Privacy fix round 1, J9: a `config.json` that exists but fails to parse must fail
+    /// closed with a clear, mapped error — like every other failure in this CLI — not leak a
+    /// raw `DecodingError` through as an unmapped `internal_error`.
+    static func configInvalid(_ error: ConfigParseError) -> CLIError {
+        CLIError(
+            code: "config_invalid",
+            message: "config.json at \(error.url.path) is not valid JSON (\(error.reason))",
+            hint:
+                "Fix or remove \(error.url.path) — a config the engine cannot parse is treated as an error, never as \"no privacy settings\"",
+            exitCode: 1)
+    }
 }
 
 private struct ErrorBody: Encodable {
@@ -100,6 +112,7 @@ enum Output {
     static func cliError(_ error: Error) -> CLIError {
         switch error {
         case let error as CLIError: return error
+        case let error as ConfigParseError: return .configInvalid(error)
         case let error as StoreNotFoundError: return .dbNotFound(error.url)
         case let error as SchemaTooNewError:
             return .schemaTooNew(found: error.found, supported: error.supported)

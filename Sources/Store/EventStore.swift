@@ -183,12 +183,49 @@ public actor EventStore {
         return removed
     }
 
-    /// Spec privacy §5.6/§5.7. Returns the number of rows actually removed.
+    /// Spec privacy §5.6/§5.7. Returns the number of rows actually removed. `excludingKinds`
+    /// (privacy fix round 1, J5) lets the automatic retention sweep exempt kinds that carry no
+    /// captured user content — only configuration/permission posture — from ever being swept;
+    /// defaults to empty so every existing caller (and `purge`, which does its own id-based
+    /// deletion instead) is unaffected.
     @discardableResult
-    public func deleteEvents(olderThan ts: Double) throws -> Int {
-        let statement = try db.prepare("DELETE FROM events WHERE ts < ?").bind([.real(ts)])
+    public func deleteEvents(
+        olderThan ts: Double, excludingKinds: Set<EventKind> = []
+    ) throws
+        -> Int
+    {
+        var sql = "DELETE FROM events WHERE ts < ?"
+        var binds: [SQLValue] = [.real(ts)]
+        if !excludingKinds.isEmpty {
+            let placeholders = Array(repeating: "?", count: excludingKinds.count).joined(
+                separator: ", ")
+            sql += " AND kind NOT IN (\(placeholders))"
+            binds += excludingKinds.map { .text($0.rawValue) }
+        }
+        let statement = try db.prepare(sql).bind(binds)
         _ = try statement.step()
         return db.changes()
+    }
+
+    /// Counts rows `deleteEvents(olderThan:excludingKinds:)` would remove, without removing
+    /// them — used to preview a sweep before it runs (spec §2/§7.3's "never silently delete"
+    /// pattern, extended to retention in privacy fix round 1).
+    public func countEvents(
+        olderThan ts: Double, excludingKinds: Set<EventKind> = []
+    ) throws
+        -> Int
+    {
+        var sql = "SELECT COUNT(*) FROM events WHERE ts < ?"
+        var binds: [SQLValue] = [.real(ts)]
+        if !excludingKinds.isEmpty {
+            let placeholders = Array(repeating: "?", count: excludingKinds.count).joined(
+                separator: ", ")
+            sql += " AND kind NOT IN (\(placeholders))"
+            binds += excludingKinds.map { .text($0.rawValue) }
+        }
+        let statement = try db.prepare(sql).bind(binds)
+        guard try statement.step() else { return 0 }
+        return Int(statement.int64(0) ?? 0)
     }
 
     /// Reclaims free pages so deleted text does not linger in the file. Must not be called
