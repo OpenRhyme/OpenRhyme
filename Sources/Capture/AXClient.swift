@@ -60,6 +60,17 @@ public final class AXClient: AXReading {
             return FocusedContext(
                 app: app, window: nil, element: nil, protection: .protected(rule: rule))
         }
+        // Privacy: with no focused window we cannot evaluate the URL/document/title rules at all,
+        // so a protected page reachable through the focused element alone would be harvested.
+        // Fail closed instead — the frontmost app almost always has a focused window in real use.
+        if window == nil,
+            !policy.protectedURLPatterns.isEmpty || !policy.protectedDocumentPatterns.isEmpty
+                || !policy.protectedWindowTitlePatterns.isEmpty
+        {
+            return FocusedContext(
+                app: app, window: nil, element: nil,
+                protection: .protected(rule: "unverifiable-context"))
+        }
         var element: ElementInfo?
         if let focused = try self.element(application, kAXFocusedUIElementAttribute) {
             let ids = try attributes(

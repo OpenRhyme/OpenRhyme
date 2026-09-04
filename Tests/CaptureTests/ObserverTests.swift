@@ -655,4 +655,20 @@ import Testing
         #expect(snapshot?.windowTitle == nil)
         #expect(snapshot?.url == nil)
     }
+
+    @Test func aWindowlessContextIsTreatedAsUnverifiable() async throws {
+        let fake = FakeAXClient()
+        // No window at all, but an element with content — the shape that previously leaked.
+        fake.frontmost = safari
+        fake.contexts[10] = FocusedContext(
+            app: safari, window: nil,
+            element: ElementInfo(role: "AXWebArea", value: "page body from a vault UI"))
+        let capturer = try makeCapturer(fake: fake)
+        capturer.tick()
+        let events = await drain(capturer)
+        let snapshot = events.last { $0.kind == .contextSnapshot }
+        #expect(snapshot?.extra?["protected"] == true)
+        #expect(snapshot?.extra?["protectedBy"] == "unverifiable-context")
+        #expect(snapshot?.value == nil)
+    }
 }

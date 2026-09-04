@@ -1,3 +1,4 @@
+import Core
 import Foundation
 import Testing
 
@@ -33,5 +34,24 @@ import Testing
         let cache = client.cache(from: first)
         _ = try client.focusedContext(of: app, reusing: cache, policy: .disabled)
         #expect(client.contentReadCount == count, "unchanged context re-ran the content read")
+    }
+
+    @Test func aProtectedContextPerformsNoContentRead() throws {
+        let client = AXClient()
+        #expect(client.isTrusted(prompt: false), "grant Accessibility to the terminal first")
+        let app = try #require(client.frontmostApplication())
+        var settings = PrivacySettings()
+        settings.protectedBundleIDs = [app.bundleID ?? ""]
+        let policy = PrivacyPolicy(settings: settings)
+
+        let before = client.contentReadCount
+        let context = try client.focusedContext(of: app, reusing: nil, policy: policy)
+        #expect(client.contentReadCount == before, "a protected context ran the content ladder")
+        #expect(context.element == nil)
+        #expect(context.window == nil)
+        if case .protected = context.protection {
+        } else {
+            Issue.record("expected the frontmost app to be protected by bundle id")
+        }
     }
 }
