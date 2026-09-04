@@ -90,11 +90,16 @@ public struct FocusedContext: Sendable, Equatable {
     public var app: AppInfo
     public var window: WindowInfo?
     public var element: ElementInfo?
+    /// Spec privacy §5.4: `.protected` means no content was read for this context at all.
+    public var protection: Protection
 
-    public init(app: AppInfo, window: WindowInfo?, element: ElementInfo?) {
+    public init(
+        app: AppInfo, window: WindowInfo?, element: ElementInfo?, protection: Protection = .open
+    ) {
         self.app = app
         self.window = window
         self.element = element
+        self.protection = protection
     }
 }
 
@@ -223,9 +228,11 @@ public protocol AXReading: AnyObject {
     func runningApplications() -> [AppInfo]
     func frontmostApplication() -> AppInfo?
     /// Focused window and element of `app`. `reusing` is the previous heartbeat's cached
-    /// cheap-identity + content; when the cheap identity is unchanged the expensive content read
-    /// is skipped and the cached value reused (spec §6). Throws `AXReadError` when the app cannot be read.
-    func focusedContext(of app: AppInfo, reusing cache: ContentCache?) throws -> FocusedContext
+    /// cheap-identity + content. `policy` is evaluated after the cheap identity read and before
+    /// the content ladder, so a protected context is never read for content (privacy §5.4).
+    func focusedContext(
+        of app: AppInfo, reusing cache: ContentCache?, policy: PrivacyPolicy
+    ) throws -> FocusedContext
     /// Seconds since the last keyboard/mouse event in this session. Needs no TCC grant.
     func secondsSinceLastInput() -> Double
     /// Build a cache key from a just-read context.

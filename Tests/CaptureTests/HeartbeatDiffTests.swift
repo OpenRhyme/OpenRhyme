@@ -12,13 +12,16 @@ import Testing
     private func input(
         _ app: AppInfo?, window: WindowInfo? = nil, element: ElementInfo? = nil,
         others: Bool = false, maxBytes: Int = 1000, now: Double = 100,
-        trigger: HeartbeatDiff.Trigger = .heartbeat, input: InputClass? = nil
+        trigger: HeartbeatDiff.Trigger = .heartbeat, input: InputClass? = nil,
+        policy: PrivacyPolicy = .disabled, protection: Protection = .open
     ) -> HeartbeatDiff.Input {
         HeartbeatDiff.Input(
             frontmost: app,
-            context: app.map { FocusedContext(app: $0, window: window, element: element) },
+            context: app.map {
+                FocusedContext(app: $0, window: window, element: element, protection: protection)
+            },
             allowlist: allow, recordOtherApps: others, maxValueBytes: maxBytes, now: now,
-            trigger: trigger, input: input)
+            trigger: trigger, input: input, policy: policy)
     }
 
     @Test func firstAllowedAppActivatesAndSnapshots() {
@@ -393,5 +396,74 @@ import Testing
             previous: s1.state,
             input: input(textEdit, window: WindowInfo(title: "A"), element: body, now: 101))
         #expect(s2.events.last?.value == "shared body")
+    }
+
+    @Test func protectedContextEmitsAnAppLevelMarkerOnly() {
+        let out = HeartbeatDiff.compute(
+            previous: LastKnownState(),
+            input: input(
+                safari, window: WindowInfo(title: "Vault", url: "https://x/ui/vault/"),
+                element: ElementInfo(role: "AXWebArea", value: "secrets"),
+                protection: .protected(rule: "url")))
+        let marker = out.events.last
+        #expect(marker?.kind == .contextSnapshot)
+        #expect(marker?.bundleID == "com.apple.Safari")
+        #expect(marker?.extra?["protected"] == true)
+        #expect(marker?.extra?["protectedBy"] == "url")
+        #expect(marker?.windowTitle == nil)
+        #expect(marker?.url == nil)
+        #expect(marker?.document == nil)
+        #expect(marker?.role == nil)
+        #expect(marker?.value == nil)
+        #expect(marker?.selectedText == nil)
+        #expect(marker?.extra?["valueHash"] == nil)
+    }
+
+    @Test func protectedMarkersDedupToOnePerEntry() {
+        let first = HeartbeatDiff.compute(
+            previous: LastKnownState(),
+            input: input(safari, protection: .protected(rule: "bundle-id")))
+        let second = HeartbeatDiff.compute(
+            previous: first.state,
+            input: input(safari, protection: .protected(rule: "bundle-id")))
+        #expect(first.events.map(\.kind) == [.appActivated, .contextSnapshot])
+        #expect(second.events.isEmpty)
+    }
+
+    @Test func leavingAProtectedContextResumesNormalCapture() {
+        let protectedOut = HeartbeatDiff.compute(
+            previous: LastKnownState(),
+            input: input(safari, protection: .protected(rule: "bundle-id")))
+        let open = HeartbeatDiff.compute(
+            previous: protectedOut.state,
+            input: input(
+                safari, window: WindowInfo(title: "Docs"),
+                element: ElementInfo(role: "AXWebArea", value: "hello")))
+        #expect(open.events.map(\.kind) == [.contextSnapshot])
+        #expect(open.events[0].windowTitle == "Docs")
+        #expect(open.events[0].value == "hello")
+        #expect(open.events[0].extra?["protected"] == nil)
+    }
+
+    @Test func protectedMarkerStillCarriesAFingerprint() {
+        let out = HeartbeatDiff.compute(
+            previous: LastKnownState(),
+            input: input(safari, protection: .protected(rule: "bundle-id")))
+        #expect(
+            out.events.last?.extra?["fingerprint"]
+                == .string(
+                    Fingerprint.compute(
+                        bundleID: "com.apple.Safari", windowTitle: nil, document: nil, url: nil)))
+    }
+
+    @Test func redactedRulesAreReportedOnOrdinaryRows() {
+        let out = HeartbeatDiff.compute(
+            previous: LastKnownState(),
+            input: input(
+                safari, window: WindowInfo(title: "Editor"),
+                element: ElementInfo(role: "AXTextArea", value: "key AKIAQQQQWWWWEEEERRRR here"),
+                policy: PrivacyPolicy(settings: PrivacySettings())))
+        #expect(out.events.last?.value == "key [redacted:aws-key] here")
+        #expect(out.events.last?.extra?["redacted"] == .array([.string("aws-key")]))
     }
 }

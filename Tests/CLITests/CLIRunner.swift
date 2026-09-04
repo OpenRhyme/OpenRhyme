@@ -29,8 +29,14 @@ enum CLIRunner {
         return products.appendingPathComponent("openrhyme")
     }
 
+    /// `env` is required, and every caller must put `OPENRHYME_DATA_DIR` in it (use
+    /// `tempEnv()` when the test does not care about the store). Privacy fix round 2, S6: it
+    /// used to default to `[:]`, which meant a test that forgot it inherited the developer's
+    /// real `~/Library/Application Support/OpenRhyme` and ran a command against their live
+    /// history on every `swift test`. Making the parameter mandatory is what stops that coming
+    /// back — the compiler now asks the question the reviewer had to ask by hand.
     static func run(
-        _ args: [String], env: [String: String] = [:], stdin: String? = nil
+        _ args: [String], env: [String: String], stdin: String? = nil
     ) throws -> (stdout: String, stderr: String, status: Int32) {
         let process = Process()
         process.executableURL = binaryURL
@@ -77,6 +83,13 @@ enum CLIRunner {
             .appendingPathComponent("orh-cli-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
+    }
+
+    /// A throwaway data dir as a ready-made environment, for tests whose command has nothing to
+    /// do with stored events (`version`, `--help`, an argument-validation failure). They still
+    /// must not be pointed at the real store.
+    static func tempEnv() throws -> [String: String] {
+        ["OPENRHYME_DATA_DIR": try tempDataDir().path]
     }
 
     static func json(_ text: String) throws -> [String: Any] {

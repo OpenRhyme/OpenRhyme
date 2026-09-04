@@ -1,9 +1,14 @@
+import Capture
+import Core
 import Foundation
 import Testing
 
+@testable import openrhyme
+
 @Suite struct InspectCommandTests {
     @Test func inspectEitherReportsContextOrNotTrusted() throws {
-        let result = try CLIRunner.run(["inspect", "--json", "--depth", "1"])
+        let result = try CLIRunner.run(
+            ["inspect", "--json", "--depth", "1"], env: try CLIRunner.tempEnv())
         let envelope = try CLIRunner.json(result.stdout)
         if result.status == 3 {
             #expect(envelope["ok"] as? Bool == false)
@@ -17,7 +22,177 @@ import Testing
     }
 
     @Test func inspectRejectsNegativeDepth() throws {
-        let result = try CLIRunner.run(["inspect", "--depth", "-1", "--json"])
+        let result = try CLIRunner.run(
+            ["inspect", "--depth", "-1", "--json"], env: try CLIRunner.tempEnv())
         #expect(result.status == 2 || result.status == 64)  // ArgumentParser uses EX_USAGE
+    }
+
+    // MARK: - Privacy §5.4: `inspect` must not be a bypass.
+    //
+    // A protected `Inspection` (produced when either AXClient call sees a non-nil `protectedBy`)
+    // must render nothing else: no window, no element, no attribute names, no tree. Exercising
+    // the actual live AX wiring end-to-end (both `focusedContext` and `focusedElementInspection`
+    // called with the *same*, real policy) needs a genuinely protected frontmost context, which
+    // `InspectPrivacyLiveTests` below covers under `OPENRHYME_LIVE_AX=1`. These two tests pin the
+    // presentation contract without needing live AX: given a protected `Inspection`, the human
+    // and JSON output must carry only the rule, never window/document/url/element content.
+
+    @Test func protectedInspectionHumanOutputIsOnlyTheRuleLine() {
+        let inspection = InspectCommand.Inspection(
+            app: nil, window: nil, element: nil, attributeNames: [], tree: nil,
+            protectedBy: "bundle-id")
+        #expect(InspectCommand.human(inspection) == "protected by rule 'bundle-id' — nothing read")
+    }
+
+    @Test func protectedInspectionJSONCarriesOnlyTheRuleNoLeakedFields() throws {
+        let inspection = InspectCommand.Inspection(
+            app: nil, window: nil, element: nil, attributeNames: [], tree: nil, protectedBy: "url")
+        let object =
+            try JSONSerialization.jsonObject(with: JSONEncoder().encode(inspection))
+            as? [String: Any]
+        #expect(object?["protected_by"] as? String == "url")
+        #expect(object?["window"] == nil || object?["window"] is NSNull)
+        #expect(object?["element"] == nil || object?["element"] is NSNull)
+        #expect(object?["tree"] == nil || object?["tree"] is NSNull)
+        #expect((object?["attribute_names"] as? [String])?.isEmpty == true)
+    }
+
+    // MARK: - G1 (privacy fix round 2): `focusedContext` and `focusedElementInspection`
+    // evaluate the policy independently — `inspect` must never trust only one of them.
+    // `InspectCommand.protectedBy` is the pure combinator that makes this pinnable without
+    // live AX; `InspectPrivacyLiveTests` below separately proves the two real AXClient calls
+    // agree on an actual windowless target.
+
+    @Test func windowlessGuardOnContextAloneIsStillTreatedAsProtected() {
+        // The exact shape of the bug: `focusedContext` correctly fails closed
+        // (`.protected("unverifiable-context")`) on a windowless context, but
+        // `focusedElementInspection` — before this fix — fell through and returned
+        // `protectedBy: nil`. A combinator that only reads `inspection` would miss this.
+        let result = InspectCommand.protectedBy(
+            context: .protected(rule: "unverifiable-context"), inspection: nil)
+        #expect(result == "unverifiable-context")
+    }
+
+    @Test func windowlessGuardOnInspectionAloneIsStillTreatedAsProtected() {
+        let result = InspectCommand.protectedBy(context: .open, inspection: "bundle-id")
+        #expect(result == "bundle-id")
+    }
+
+    @Test func openOnBothSidesIsOpen() {
+        #expect(InspectCommand.protectedBy(context: .open, inspection: nil) == nil)
+    }
+
+    // MARK: - I7 (whole-branch review): the protect rules were only half the policy. `inspect`
+    // returned `context.element` verbatim and never called `Redaction.apply`, so on an *open*
+    // context a credential-named field and a pasted key both printed in full — while the README
+    // said `inspect` "honours the same policy as capture".
+
+    @Test func inspectAppliesTheCredentialFieldGuardOnAnOpenContext() {
+        let element = ElementInfo(
+            role: "AXTextField", identifier: "current-password", value: "hunter2",
+            selectedText: "hunter2")
+        let out = InspectCommand.applyPolicy(
+            element: element, window: WindowInfo(title: "Login"),
+            policy: PrivacyPolicy(settings: PrivacySettings()), maxValueBytes: 1000)
+        #expect(out.element?.value == nil)
+        #expect(out.element?.selectedText == nil)
+        #expect(out.element?.identifier == "current-password")
+    }
+
+    @Test func inspectRedactsSecretsInTheElementAndTheWindowFields() {
+        let key = "AKIAQQQQWWWWEEEERRRR"
+        let element = ElementInfo(
+            role: "AXTextArea", title: "label \(key)", value: "body \(key)",
+            selectedText: "sel \(key)")
+        let window = WindowInfo(
+            title: "Report \(key)", document: "/tmp/\(key).txt",
+            url: "https://ex.com/?token=\(key)")
+        let out = InspectCommand.applyPolicy(
+            element: element, window: window, policy: PrivacyPolicy(settings: PrivacySettings()),
+            maxValueBytes: 1000)
+        #expect(out.element?.value == "body [redacted:aws-key]")
+        #expect(out.element?.selectedText == "sel [redacted:aws-key]")
+        #expect(out.element?.title == "label [redacted:aws-key]")
+        #expect(out.window?.title == "Report [redacted:aws-key]")
+        #expect(out.window?.document == "/tmp/[redacted:aws-key].txt")
+        #expect(out.window?.url == "https://ex.com/?token=[redacted:aws-key]")
+    }
+
+    @Test func ignorePrivacyPassesTextThroughButNeverLiftsTheSecureFieldGuard() {
+        let key = "AKIAQQQQWWWWEEEERRRR"
+        let plain = InspectCommand.applyPolicy(
+            element: ElementInfo(role: "AXTextArea", value: "body \(key)"),
+            window: WindowInfo(title: "Report \(key)"), policy: .disabled, maxValueBytes: 1000)
+        #expect(plain.element?.value == "body \(key)")
+        #expect(plain.window?.title == "Report \(key)")
+
+        let secure = InspectCommand.applyPolicy(
+            element: ElementInfo(
+                role: "AXTextField", subrole: "AXSecureTextField", value: "hunter2"),
+            window: nil, policy: .disabled, maxValueBytes: 1000)
+        #expect(secure.element?.value == nil)
+    }
+
+    @Test func inspectionRuleWinsWhenBothSidesAgreeOnBeingProtected() {
+        // Both sides protected is the common case; either rule name is acceptable to report,
+        // but the result must never be nil.
+        let result = InspectCommand.protectedBy(
+            context: .protected(rule: "bundle-id"), inspection: "bundle-id")
+        #expect(result == "bundle-id")
+    }
+}
+
+/// Live AX tests. Require a TCC grant on the terminal; never run in CI (see
+/// `Tests/CaptureTests/LiveContentTests.swift`).
+/// Deterministic without controlling what's on screen: the frontmost app is made to protect
+/// *itself* by adding its own bundle id to `protected_bundle_ids`, exactly like
+/// `LiveContentTests.aProtectedContextPerformsNoContentRead`.
+///
+/// OPENRHYME_LIVE_AX=1 swift test --filter InspectPrivacyLiveTests
+@Suite(.enabled(if: ProcessInfo.processInfo.environment["OPENRHYME_LIVE_AX"] == "1"))
+@MainActor struct InspectPrivacyLiveTests {
+    @Test func plainInspectLeaksNothingForAProtectedContextAndIgnorePrivacyIsTheOnlyBypass()
+        throws
+    {
+        let client = AXClient()
+        #expect(client.isTrusted(prompt: false), "grant Accessibility to the terminal first")
+        let app = try #require(client.frontmostApplication())
+        let bundleID = try #require(app.bundleID)
+
+        let dir = try CLIRunner.tempDataDir()
+        var settings = PrivacySettings()
+        settings.protectedBundleIDs = [bundleID]
+        try Config(privacy: settings).save(to: dir.appendingPathComponent("config.json"))
+        let env = ["OPENRHYME_DATA_DIR": dir.path]
+
+        // Plain `inspect`: must protect the context and print/emit nothing else.
+        let plain = try CLIRunner.run(["inspect", "--json"], env: env)
+        #expect(plain.status == 0, "\(plain.stderr)")
+        #expect(plain.stderr.isEmpty)
+        let plainData = try #require(try CLIRunner.json(plain.stdout)["data"] as? [String: Any])
+        #expect(plainData["protected_by"] as? String == "bundle-id")
+        #expect(plainData["window"] == nil || plainData["window"] is NSNull)
+        #expect(plainData["element"] == nil || plainData["element"] is NSNull)
+        #expect(plainData["tree"] == nil || plainData["tree"] is NSNull)
+        #expect((plainData["attribute_names"] as? [String])?.isEmpty == true)
+
+        let plainHuman = try CLIRunner.run(["inspect"], env: env)
+        #expect(plainHuman.status == 0, "\(plainHuman.stderr)")
+        #expect(
+            plainHuman.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+                == "protected by rule 'bundle-id' — nothing read")
+        for leaked in ["window:", "document:", "url:", "element:", "value:", "selected:"] {
+            #expect(!plainHuman.stdout.contains(leaked), "human output leaked '\(leaked)'")
+        }
+
+        // `--ignore-privacy` is the only way to see through it, and it must warn on stderr.
+        let bypass = try CLIRunner.run(["inspect", "--ignore-privacy", "--json"], env: env)
+        #expect(bypass.status == 0, "\(bypass.stderr)")
+        #expect(
+            bypass.stderr.contains(
+                "warning: --ignore-privacy bypasses the protect rules for this read"))
+        let bypassData = try #require(try CLIRunner.json(bypass.stdout)["data"] as? [String: Any])
+        #expect(bypassData["protected_by"] == nil || bypassData["protected_by"] is NSNull)
+        #expect(bypassData["window"] != nil && !(bypassData["window"] is NSNull))
     }
 }

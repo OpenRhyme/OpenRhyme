@@ -9,12 +9,20 @@ struct CLIError: Error {
     let message: String
     let hint: String?
     let exitCode: Int32
+    /// Structured detail alongside the error, e.g. `purge`'s `{matched, deleted, vacuumed}` when
+    /// it fails partway through: a script reading `ok: false` should not also have to guess what
+    /// state that left the store in. `nil` for every other error, so their JSON is unchanged.
+    let data: JSONValue?
 
-    init(code: String, message: String, hint: String? = nil, exitCode: Int32 = 1) {
+    init(
+        code: String, message: String, hint: String? = nil, exitCode: Int32 = 1,
+        data: JSONValue? = nil
+    ) {
         self.code = code
         self.message = message
         self.hint = hint
         self.exitCode = exitCode
+        self.data = data
     }
 
     static let notTrusted = CLIError(
@@ -47,12 +55,25 @@ struct CLIError: Error {
     static func usage(_ message: String) -> CLIError {
         CLIError(code: "usage", message: message, exitCode: 2)
     }
+
+    /// Privacy fix round 1, J9: a `config.json` that exists but fails to parse must fail
+    /// closed with a clear, mapped error — like every other failure in this CLI — not leak a
+    /// raw `DecodingError` through as an unmapped `internal_error`.
+    static func configInvalid(_ error: ConfigParseError) -> CLIError {
+        CLIError(
+            code: "config_invalid",
+            message: "config.json at \(error.url.path) is not valid JSON (\(error.reason))",
+            hint:
+                "Fix or remove \(error.url.path) — a config the engine cannot parse is treated as an error, never as \"no privacy settings\"",
+            exitCode: 1)
+    }
 }
 
 private struct ErrorBody: Encodable {
     let code: String
     let message: String
     let hint: String?
+    let data: JSONValue?
 }
 
 private struct Envelope<T: Encodable>: Encodable {
@@ -81,7 +102,8 @@ enum Output {
     static func envelope(_ error: CLIError) -> String {
         let body = Envelope<String>(
             ok: false, data: nil,
-            error: ErrorBody(code: error.code, message: error.message, hint: error.hint))
+            error: ErrorBody(
+                code: error.code, message: error.message, hint: error.hint, data: error.data))
         return String(
             decoding: (try? jsonEncoder.encode(body)) ?? Data("{\"ok\":false}".utf8), as: UTF8.self)
     }
@@ -90,6 +112,7 @@ enum Output {
     static func cliError(_ error: Error) -> CLIError {
         switch error {
         case let error as CLIError: return error
+        case let error as ConfigParseError: return .configInvalid(error)
         case let error as StoreNotFoundError: return .dbNotFound(error.url)
         case let error as SchemaTooNewError:
             return .schemaTooNew(found: error.found, supported: error.supported)

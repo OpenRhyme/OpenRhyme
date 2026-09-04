@@ -405,10 +405,48 @@ import Testing
         #expect(events.map(\.kind) == [.permissionChanged, .appActivated, .contextSnapshot])
     }
 
-    @Test func menuSelectionEmitsTheTitleWithoutAContextRead() async throws {
+    /// Whole-branch review C1: the menu path used to record the title with no policy check at
+    /// all. It now clears the same protect rules as every other capture path, which costs one
+    /// focused-context read whenever a window-dependent rule is configured (the default).
+    @Test func menuSelectionEmitsTheTitleOnlyAfterThePolicyClearsTheContext() async throws {
         let fake = FakeAXClient()
         fake.show(safari, window: WindowInfo(title: "A"))
         let capturer = try makeCapturer(fake: fake)
+        capturer.tick()
+        let reads = fake.focusedContextCalls
+        capturer.handle(
+            change: ObservedChange(pid: 10, kind: .menuItemSelected, menuTitle: "Save", ts: 7))
+        #expect(fake.focusedContextCalls == reads + 1)
+        let events = await drain(capturer)
+        #expect(events.last?.kind == .menuItemSelected)
+        #expect(events.last?.elementTitle == "Save")
+        #expect(events.last?.ts == 7)
+        #expect(events.last?.bundleID == "com.apple.Safari")
+    }
+
+    /// Whole-branch review H2: a menu title is stored text like any other column, so it goes
+    /// through capture-time secret redaction too — a "Copy token …" item in an app the rules do
+    /// not protect must not land on disk in the clear.
+    @Test func menuSelectionTitleIsSecretRedactedAtCaptureTime() async throws {
+        let fake = FakeAXClient()
+        fake.show(safari, window: WindowInfo(title: "A"))
+        let capturer = try makeCapturer(fake: fake)
+        capturer.tick()
+        capturer.handle(
+            change: ObservedChange(
+                pid: 10, kind: .menuItemSelected, menuTitle: "Copy AKIAQQQQWWWWEEEERRRR", ts: 7))
+        let events = await drain(capturer)
+        #expect(events.last?.kind == .menuItemSelected)
+        #expect(events.last?.elementTitle == "Copy [redacted:aws-key]")
+        #expect(events.last?.extra?["redacted"] == .array([.string("aws-key")]))
+    }
+
+    /// The read is taken only when a rule that needs a window is actually configured, so the
+    /// original "menu selections are free" property survives wherever the policy cannot object.
+    @Test func menuSelectionSkipsThePolicyReadWhenNoWindowRuleCanApply() async throws {
+        let fake = FakeAXClient()
+        fake.show(safari, window: WindowInfo(title: "A"))
+        let capturer = try makeCapturer(fake: fake) { $0.privacy.enabled = false }
         capturer.tick()
         let reads = fake.focusedContextCalls
         capturer.handle(
@@ -417,8 +455,114 @@ import Testing
         let events = await drain(capturer)
         #expect(events.last?.kind == .menuItemSelected)
         #expect(events.last?.elementTitle == "Save")
-        #expect(events.last?.ts == 7)
-        #expect(events.last?.bundleID == "com.apple.Safari")
+    }
+
+    /// C1, the leak as the reviewer proved it live: Safari both allowlisted *and* protected by
+    /// bundle id still emitted `elementTitle = "Copy Password for github.com (work)"`. A
+    /// protected app must not even be registered for menu notifications, and a notification
+    /// that arrives anyway (one queued across a config reload) must record nothing.
+    @Test func menuNotificationsAreNeverRegisteredForABundleIDProtectedApp() async throws {
+        let fake = FakeAXClient()
+        fake.running = [safari]
+        fake.show(safari, window: WindowInfo(title: "1Password"))
+        let capturer = try makeCapturer(fake: fake) {
+            $0.privacy.protectedBundleIDs.insert("com.apple.Safari")
+        }
+        capturer.tick()
+        #expect(fake.observedKinds[10]?.contains(.menuItemSelected) == false)
+        #expect(fake.observedKinds[10]?.contains(.focusedWindowChanged) == true)
+        // Privacy fix round 5, P4: the belt-and-braces delivery below used to prove nothing.
+        // `Capturer.handle` drops the change on `enabledKinds`, and even past that
+        // `recordMenuSelection` refuses a bundle-id-protected app — so "no title was recorded"
+        // held no matter which gate was broken, and the assertion could not fail. What *is*
+        // observable is whether the notification recorded anything **at all**: a leak past the
+        // delivery gate emits a fresh protected marker stamped with the notification's own ts.
+        // That is only distinguishable while the last recorded context is a different one, so
+        // move focus to an unprotected app first — otherwise the marker dedups against the one
+        // the heartbeat above already emitted and the delivery is unobservable again.
+        fake.show(textEdit, window: WindowInfo(title: "notes.md"))
+        capturer.tick()
+        fake.frontmost = safari  // Safari is frontmost again when the queued notification lands
+
+        // Deliver one anyway, as a notification queued across a config reload would.
+        fake.deliver(
+            ObservedChange(
+                pid: 10, kind: .menuItemSelected,
+                menuTitle: "Copy Password for github.com (work)", ts: 7))
+        let events = await drain(capturer)
+        // Nothing whatsoever was recorded for it — not the title, and not a marker either.
+        #expect(!events.contains { $0.ts == 7 })
+        #expect(!events.map(\.kind).contains(.menuItemSelected))
+        #expect(!events.contains { $0.elementTitle?.contains("Password") == true })
+        #expect(events.contains { $0.extra?["protectedBy"] == "bundle-id" })
+    }
+
+    /// C1: `File ▸ Open Recent` and `Window ▸ …` carry exactly the `.env` and `*.pem` paths the
+    /// document rules exist to protect. A document rule cannot be evaluated at registration
+    /// time, so the gate has to hold on delivery — and it yields the same content-free marker
+    /// row every other capture path emits for a protected context.
+    @Test func menuSelectionInADocumentProtectedAppEmitsAMarkerNotTheTitle() async throws {
+        let fake = FakeAXClient()
+        fake.running = [textEdit]
+        fake.show(textEdit, window: WindowInfo(title: "notes.md", document: "/Users/me/notes.md"))
+        let capturer = try makeCapturer(fake: fake)
+        capturer.tick()  // an open context first, so the marker below cannot be a leftover
+        #expect(fake.observedKinds[20]?.contains(.menuItemSelected) == true)
+
+        fake.show(textEdit, window: WindowInfo(title: ".env", document: "/Users/me/proj/.env"))
+        capturer.handle(
+            change: ObservedChange(
+                pid: 20, kind: .menuItemSelected, menuTitle: "/Users/me/proj/.env", ts: 9))
+
+        let events = await drain(capturer)
+        #expect(!events.map(\.kind).contains(.menuItemSelected))
+        #expect(!events.contains { ($0.elementTitle ?? "").contains(".env") })
+        let marker = try #require(events.last)
+        #expect(marker.kind == .contextSnapshot)
+        #expect(marker.ts == 9)
+        #expect(marker.bundleID == "com.apple.TextEdit")
+        #expect(marker.extra?["protected"] == true)
+        #expect(marker.extra?["protectedBy"] == "document")
+        #expect(marker.document == nil)
+        #expect(marker.windowTitle == nil)
+        #expect(marker.value == nil)
+    }
+
+    /// C1: a context the daemon cannot read cannot be cleared, so the title is not recorded —
+    /// the same fail-closed rule `AXClient.focusedContext` applies to a windowless app.
+    @Test func menuSelectionIsNotRecordedWhenTheContextCannotBeRead() async throws {
+        let fake = FakeAXClient()
+        fake.show(safari, window: WindowInfo(title: "A"))
+        let capturer = try makeCapturer(fake: fake)
+        capturer.tick()
+        fake.errors[safari.pid] = .cannotComplete
+        capturer.handle(
+            change: ObservedChange(pid: 10, kind: .menuItemSelected, menuTitle: "Save", ts: 7))
+        let events = await drain(capturer)
+        #expect(!events.map(\.kind).contains(.menuItemSelected))
+        #expect(events.last?.extra?["protectedBy"] == "unverifiable-context")
+    }
+
+    /// C1: the registration gate has to follow a config reload, or an app protected after the
+    /// daemon started keeps its menu observer for the rest of the process's life.
+    @Test func addingAProtectRuleAtRuntimeTakesTheMenuObserverAway() throws {
+        let fake = FakeAXClient()
+        fake.running = [safari]
+        let capturer = try makeCapturer(fake: fake)
+        capturer.tick()
+        #expect(fake.observedKinds[10] == Set(ObservedKind.allCases))
+
+        var edited = capturer.config
+        edited.privacy.protectedBundleIDs.insert("com.apple.Safari")
+        try edited.save(to: capturer.paths.configURL)
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date(timeIntervalSinceNow: 10)],
+            ofItemAtPath: capturer.paths.configURL.path)
+
+        capturer.tick()  // reload → reconcile → re-register without the menu family
+        #expect(capturer.privacyPolicy.protectedBundleIDs.contains("com.apple.Safari"))
+        #expect(fake.observedKinds[10]?.contains(.menuItemSelected) == false)
+        #expect(fake.stopObservingCalls == [10])
     }
 
     @Test func menuSelectionIsIgnoredForANonAllowlistedFrontmostApp() async throws {
@@ -636,5 +780,105 @@ import Testing
         #expect(capturer.config.capture.notifications == ["window"])
         capturer.tick()
         #expect(fake.observedKinds[10] == [.focusedWindowChanged])
+    }
+
+    @Test func aProtectedContextIsNeverReadForContent() async throws {
+        let fake = FakeAXClient()
+        fake.show(
+            safari, window: WindowInfo(title: "Vault", url: "https://x.example/ui/vault/secrets"),
+            element: ElementInfo(role: "AXWebArea", value: "secret list"))
+        let capturer = try makeCapturer(fake: fake)
+        capturer.tick()
+        // The policy reached the AX layer, and the fake reports the context it returned.
+        #expect(fake.lastPolicy?.enabled == true)
+        let events = await drain(capturer)
+        let snapshot = events.last { $0.kind == .contextSnapshot }
+        #expect(snapshot?.extra?["protected"] == true)
+        #expect(snapshot?.extra?["protectedBy"] == "url")
+        #expect(snapshot?.value == nil)
+        #expect(snapshot?.windowTitle == nil)
+        #expect(snapshot?.url == nil)
+    }
+
+    @Test func aWindowlessContextIsTreatedAsUnverifiable() async throws {
+        let fake = FakeAXClient()
+        // No window at all, but an element with content — the shape that previously leaked.
+        fake.frontmost = safari
+        fake.contexts[10] = FocusedContext(
+            app: safari, window: nil,
+            element: ElementInfo(role: "AXWebArea", value: "page body from a vault UI"))
+        let capturer = try makeCapturer(fake: fake)
+        capturer.tick()
+        let events = await drain(capturer)
+        let snapshot = events.last { $0.kind == .contextSnapshot }
+        #expect(snapshot?.extra?["protected"] == true)
+        #expect(snapshot?.extra?["protectedBy"] == "unverifiable-context")
+        #expect(snapshot?.value == nil)
+    }
+
+    @Test func aWindowlessContextIsOpenWhenPrivacyIsDisabled() async throws {
+        let fake = FakeAXClient()
+        fake.frontmost = safari
+        fake.contexts[10] = FocusedContext(
+            app: safari, window: nil,
+            element: ElementInfo(role: "AXWebArea", value: "ordinary page body"))
+        let capturer = try makeCapturer(fake: fake) { $0.privacy.enabled = false }
+        capturer.tick()
+        let events = await drain(capturer)
+        let snapshot = events.last { $0.kind == .contextSnapshot }
+        #expect(snapshot?.extra?["protected"] == nil)
+        #expect(snapshot?.value == "ordinary page body")
+    }
+
+    /// The defect this closes: `HeartbeatDiff.Input.policy` defaults to `.disabled`, so omitting
+    /// the argument at the call site compiles cleanly while silently killing every redaction rule
+    /// (only the unconditional secure-text-field guard would still fire). Driven through the
+    /// `Capturer`, not `Redaction`/`HeartbeatDiff` directly, so it proves the wiring, not just the
+    /// pure function.
+    @Test func aCredentialShapedSecretInCapturedTextIsRedactedThroughTheCapturer() async throws {
+        let fake = FakeAXClient()
+        fake.show(
+            safari, window: WindowInfo(title: "Notes"),
+            element: ElementInfo(role: "AXTextArea", value: "key AKIAQQQQWWWWEEEERRRR here"))
+        let capturer = try makeCapturer(fake: fake)
+        capturer.tick()
+        let events = await drain(capturer)
+        let snapshot = events.last { $0.kind == .contextSnapshot }
+        #expect(snapshot?.value == "key [redacted:aws-key] here")
+        #expect(snapshot?.extra?["redacted"] == .array([.string("aws-key")]))
+    }
+
+    /// The escape hatch: `privacy.enabled = false` must still skip redaction end-to-end.
+    @Test func redactionIsSkippedThroughTheCapturerWhenPrivacyIsDisabled() async throws {
+        let fake = FakeAXClient()
+        fake.show(
+            safari, window: WindowInfo(title: "Notes"),
+            element: ElementInfo(role: "AXTextArea", value: "key AKIAQQQQWWWWEEEERRRR here"))
+        let capturer = try makeCapturer(fake: fake) { $0.privacy.enabled = false }
+        capturer.tick()
+        let events = await drain(capturer)
+        let snapshot = events.last { $0.kind == .contextSnapshot }
+        #expect(snapshot?.value == "key AKIAQQQQWWWWEEEERRRR here")
+        #expect(snapshot?.extra?["redacted"] == nil)
+    }
+
+    @Test func policyIsRecompiledOnConfigReload() async throws {
+        let fake = FakeAXClient()
+        fake.show(safari, window: WindowInfo(title: "Docs"))
+        let capturer = try makeCapturer(fake: fake) { $0.privacy.protectedBundleIDs = [] }
+        capturer.tick()
+        #expect(capturer.privacyPolicy.protectedBundleIDs.isEmpty)
+        #expect(fake.lastPolicy?.protectedBundleIDs.isEmpty == true)
+
+        var edited = capturer.config
+        edited.privacy.protectedBundleIDs = ["com.apple.Safari"]
+        try edited.save(to: capturer.paths.configURL)
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date(timeIntervalSinceNow: 10)],
+            ofItemAtPath: capturer.paths.configURL.path)
+        capturer.tick()
+        #expect(capturer.privacyPolicy.protectedBundleIDs == ["com.apple.Safari"])
+        let events = await drain(capturer)
+        #expect(events.last?.extra?["protectedBy"] == "bundle-id")
     }
 }

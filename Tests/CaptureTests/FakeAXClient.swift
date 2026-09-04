@@ -16,6 +16,7 @@ final class FakeAXClient: AXReading {
     private(set) var focusedContextCalls = 0
     private(set) var timeout: Float?
     private(set) var lastReusing: ContentCache?
+    private(set) var lastPolicy: PrivacyPolicy?
 
     private(set) var observing: [Int32: @MainActor (ObservedChange) -> Void] = [:]
     private(set) var observedKinds: [Int32: Set<ObservedKind>] = [:]
@@ -40,11 +41,28 @@ final class FakeAXClient: AXReading {
 
     func frontmostApplication() -> AppInfo? { frontmost }
 
-    func focusedContext(of app: AppInfo, reusing cache: ContentCache?) throws -> FocusedContext {
+    func focusedContext(
+        of app: AppInfo, reusing cache: ContentCache?, policy: PrivacyPolicy
+    ) throws -> FocusedContext {
         focusedContextCalls += 1
         lastReusing = cache
+        lastPolicy = policy
         if let error = errors[app.pid] { throw error }
-        return contexts[app.pid] ?? FocusedContext(app: app, window: nil, element: nil)
+        let context = contexts[app.pid] ?? FocusedContext(app: app, window: nil, element: nil)
+        if case .protected(let rule) = policy.evaluateContext(
+            bundleID: app.bundleID, windowTitle: context.window?.title,
+            document: context.window?.document, url: context.window?.url)
+        {
+            return FocusedContext(
+                app: app, window: nil, element: nil, protection: .protected(rule: rule))
+        }
+        // Mirrors AXClient.focusedContext's windowless fail-closed rule via the same shared
+        // helper (privacy fix round 1; the helper itself landed in round 2 so this can never
+        // drift from the real implementation again).
+        if context.window == nil, let protection = policy.protectionForWindowlessContext() {
+            return FocusedContext(app: app, window: nil, element: nil, protection: protection)
+        }
+        return context
     }
 
     func secondsSinceLastInput() -> Double { idleSeconds }

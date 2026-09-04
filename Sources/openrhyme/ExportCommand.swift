@@ -1,4 +1,5 @@
 import ArgumentParser
+import Capture
 import Core
 import Foundation
 import Store
@@ -10,15 +11,38 @@ struct ExportCommand: AsyncParsableCommand {
     @Option(name: .long, help: "Start time: 2h, 30m, unix seconds, or ISO-8601.") var since: String
     @Option(name: .long, help: "End time (same grammar).") var until: String?
     @Option(name: .long, help: "Write to this file instead of stdout.") var out: String?
+    @Flag(
+        name: .long,
+        help:
+            "Export stored text unredacted, so you can audit what the store actually holds (prints a warning; reads only)."
+    )
+    var ignorePrivacy = false
 
     func run() async throws {
         do {
             let sinceTS = try TimeSpec.parse(since)
             let untilTS = try until.map { try TimeSpec.parse($0) }
-            let store = try EventStore(url: Paths.resolve().databaseURL, readOnly: true)
+            let paths = Paths.resolve()
+            let config = try Config.load(from: paths.configURL)
+            // H3: same opt-in escape hatch as `events`, same name, same warning — without it the
+            // owner cannot verify what a purge actually removed. An unredacted `--out` file is
+            // still created `0600` below, but it is a plaintext copy of the store: see Limits.
+            let policy =
+                ignorePrivacy ? PrivacyPolicy.disabled : PrivacyPolicy(settings: config.privacy)
+            if ignorePrivacy { Output.stderr(EventsCommand.ignorePrivacyWarning) }
+            let store = try EventStore(url: paths.databaseURL, readOnly: true)
             let handle: FileHandle
             if let out {
-                FileManager.default.createFile(atPath: out, contents: nil)
+                // Whole-branch review I8: an export holds the same content as the store, so it
+                // gets the store's mode (spec privacy §5.6), not the umask's 0644. Created
+                // owner-only, and tightened afterwards as well so an already-existing,
+                // looser-permissioned target is not silently written into at 0644 — the same
+                // create-then-tighten pair `EventStore` uses.
+                let owner: [FileAttributeKey: Any] = [
+                    .posixPermissions: NSNumber(value: Int16(0o600))
+                ]
+                FileManager.default.createFile(atPath: out, contents: nil, attributes: owner)
+                try? FileManager.default.setAttributes(owner, ofItemAtPath: out)
                 handle = try FileHandle(forWritingTo: URL(fileURLWithPath: out))
             } else {
                 handle = FileHandle.standardOutput
@@ -33,7 +57,11 @@ struct ExportCommand: AsyncParsableCommand {
                     EventQuery(
                         since: sinceTS, until: untilTS, limit: EventQuery.maxLimit, afterID: afterID
                     ))
-                for event in page {
+                // Export is a read path too (spec privacy §4/§5.7): the same projection
+                // `events` applies runs here, un-truncated (`maxValueChars: 0`) since export
+                // has no char-limit flag of its own.
+                let projected = EventsCommand.project(page, policy: policy, maxValueChars: 0)
+                for event in projected {
                     handle.write(Data((try JSONLExport.line(for: event) + "\n").utf8))
                 }
                 guard page.count == EventQuery.maxLimit, let last = page.last?.id else { break }

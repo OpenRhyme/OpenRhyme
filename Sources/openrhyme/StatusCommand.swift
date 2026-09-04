@@ -21,6 +21,9 @@ struct StatusCommand: AsyncParsableCommand {
         let lastEventTS: Double?
         let allowlist: [String]
         let opaqueApps: [String]
+        /// Privacy fix round 1: `capture.retention_days` was reported by no command before this
+        /// — `0` means unset/keep everything.
+        let retentionDays: Int
 
         enum CodingKeys: String, CodingKey {
             case trusted, state, pid, allowlist
@@ -30,6 +33,7 @@ struct StatusCommand: AsyncParsableCommand {
             case eventCount = "event_count"
             case lastEventTS = "last_event_ts"
             case opaqueApps = "opaque_apps"
+            case retentionDays = "retention_days"
         }
     }
 
@@ -52,7 +56,8 @@ struct StatusCommand: AsyncParsableCommand {
                 state: trusted ? TrustState.active.rawValue : TrustState.needsPermission.rawValue,
                 daemonRunning: livePID != nil, pid: livePID, dataDir: paths.dataDir.path,
                 dbPath: paths.databaseURL.path, eventCount: count, lastEventTS: last,
-                allowlist: config.allowlist, opaqueApps: [])
+                allowlist: config.allowlist, opaqueApps: [],
+                retentionDays: config.capture.retentionDays)
         }
     }
 
@@ -67,6 +72,7 @@ struct StatusCommand: AsyncParsableCommand {
             data dir: \(status.dataDir)
             events:   \(status.eventCount) (last \(last))
             allowed:  \(status.allowlist.isEmpty ? "(none)" : status.allowlist.joined(separator: ", "))
+            retention: \(status.retentionDays > 0 ? "\(status.retentionDays) day(s)" : "off (keep forever)")
             """
     }
 }

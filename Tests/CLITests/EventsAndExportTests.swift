@@ -70,6 +70,38 @@ import Testing
         #expect(try String(contentsOf: out, encoding: .utf8).split(separator: "\n").count == 3)
     }
 
+    /// Whole-branch review I8: an export holds the same content as the store, which is `0600`
+    /// (spec privacy §5.6). It used to land at the umask's `0644`, world-readable, right next to
+    /// it. Both the fresh file and a pre-existing looser one must end up owner-only.
+    @Test func exportToAFileIsOwnerOnly() async throws {
+        let env = try await seeded()
+        let dir = try CLIRunner.tempDataDir()
+
+        let fresh = dir.appendingPathComponent("fresh.jsonl")
+        let result = try CLIRunner.run(
+            ["export", "--since", "1d", "--out", fresh.path], env: env)
+        #expect(result.status == 0, "\(result.stderr)")
+        var mode =
+            try FileManager.default.attributesOfItem(atPath: fresh.path)[.posixPermissions]
+            as? NSNumber
+        #expect(mode?.int16Value == 0o600)
+
+        let existing = dir.appendingPathComponent("existing.jsonl")
+        FileManager.default.createFile(
+            atPath: existing.path, contents: Data("stale\n".utf8),
+            attributes: [.posixPermissions: NSNumber(value: Int16(0o644))])
+        let overwrite = try CLIRunner.run(
+            ["export", "--since", "1d", "--out", existing.path], env: env)
+        #expect(overwrite.status == 0, "\(overwrite.stderr)")
+        mode =
+            try FileManager.default.attributesOfItem(atPath: existing.path)[.posixPermissions]
+            as? NSNumber
+        #expect(mode?.int16Value == 0o600)
+        let text = try String(contentsOf: existing, encoding: .utf8)
+        #expect(!text.contains("stale"))
+        #expect(text.split(separator: "\n").count == 3)
+    }
+
     @Test func exportPagesInInsertionOrderEvenWithNonMonotonicTimestamps() async throws {
         let dir = try CLIRunner.tempDataDir()
         let store = try EventStore(url: dir.appendingPathComponent("events.sqlite"))
@@ -104,10 +136,426 @@ import Testing
     }
 
     @Test func badTimeIsAUsageError() throws {
-        let result = try CLIRunner.run(["events", "--since", "yesterday", "--json"])
+        let result = try CLIRunner.run(
+            ["events", "--since", "yesterday", "--json"], env: try CLIRunner.tempEnv())
         #expect(result.status == 2)
         #expect(
             (try CLIRunner.json(result.stdout)["error"] as? [String: Any])?["code"] as? String
                 == "usage")
+    }
+
+    // MARK: - Read-time redaction (spec privacy §4/§5.7). Rows stored before a rule existed are
+    // the reason this exists: redaction is re-applied on every read, not just at capture time.
+
+    @Test func eventsRedactsSecretsAtReadTime() async throws {
+        let dir = try CLIRunner.tempDataDir()
+        let store = try EventStore(url: dir.appendingPathComponent("events.sqlite"))
+        // Seeded directly, bypassing capture-time redaction entirely — this is exactly what a
+        // row written before the rule existed looks like.
+        try await store.append(
+            RawEvent(
+                ts: 100, kind: .contextSnapshot, bundleID: "com.apple.TextEdit",
+                value: "token AKIAQQQQWWWWEEEERRRR end"))
+        await store.close()
+        let env = ["OPENRHYME_DATA_DIR": dir.path]
+
+        let result = try CLIRunner.run(["events", "--since", "0", "--json"], env: env)
+        #expect(result.status == 0, "\(result.stderr)")
+        let data = try CLIRunner.json(result.stdout)["data"] as? [String: Any]
+        let rows = try #require(data?["events"] as? [[String: Any]])
+        #expect(rows.first?["value"] as? String == "token [redacted:aws-key] end")
+    }
+
+    @Test func eventsDoesNotRedactWhenPrivacyIsDisabled() async throws {
+        let dir = try CLIRunner.tempDataDir()
+        let store = try EventStore(url: dir.appendingPathComponent("events.sqlite"))
+        try await store.append(
+            RawEvent(
+                ts: 100, kind: .contextSnapshot, bundleID: "com.apple.TextEdit",
+                value: "token AKIAQQQQWWWWEEEERRRR end"))
+        await store.close()
+        var settings = PrivacySettings()
+        settings.enabled = false
+        try Config(privacy: settings).save(to: dir.appendingPathComponent("config.json"))
+        let env = ["OPENRHYME_DATA_DIR": dir.path]
+
+        let result = try CLIRunner.run(["events", "--since", "0", "--json"], env: env)
+        #expect(result.status == 0, "\(result.stderr)")
+        let rows = try #require(
+            (try CLIRunner.json(result.stdout)["data"] as? [String: Any])?["events"]
+                as? [[String: Any]])
+        #expect(rows.first?["value"] as? String == "token AKIAQQQQWWWWEEEERRRR end")
+    }
+
+    // MARK: - H3 (whole-branch review): the owner could not search their own history. Every read
+    // path redacted unconditionally, so a search for the key they were worried about came back
+    // empty from `events`/`export` while `strings` on the database file found it — two commands
+    // telling the user it is not there when it is. `--ignore-privacy` is the opt-in escape hatch,
+    // named after the precedent `inspect` set: explicit, warned on stderr, never the default.
+
+    /// A row seeded raw, exactly like one captured before the rule existed — the only kind the
+    /// read path is still the sole protection for.
+    private func seededWithARawSecret() async throws -> (env: [String: String], secret: String) {
+        let dir = try CLIRunner.tempDataDir()
+        let store = try EventStore(url: dir.appendingPathComponent("events.sqlite"))
+        try await store.append(
+            RawEvent(
+                ts: 100, kind: .contextSnapshot, bundleID: "com.apple.Safari",
+                windowTitle: "Report AKIAQQQQWWWWEEEERRRR",
+                url: "https://ex.com/?token=AKIAQQQQWWWWEEEERRRR",
+                value: "token AKIAQQQQWWWWEEEERRRR end"))
+        await store.close()
+        return (["OPENRHYME_DATA_DIR": dir.path], "AKIAQQQQWWWWEEEERRRR")
+    }
+
+    @Test func eventsIgnorePrivacyReturnsStoredTextUnredactedAndWarnsOnStderr() async throws {
+        let (env, secret) = try await seededWithARawSecret()
+
+        let redacted = try CLIRunner.run(["events", "--since", "0", "--json"], env: env)
+        #expect(redacted.status == 0, "\(redacted.stderr)")
+        #expect(!redacted.stdout.contains(secret))
+        #expect(redacted.stderr.isEmpty)
+
+        let raw = try CLIRunner.run(
+            ["events", "--since", "0", "--json", "--ignore-privacy"], env: env)
+        #expect(raw.status == 0, "\(raw.stderr)")
+        let rows = try #require(
+            (try CLIRunner.json(raw.stdout)["data"] as? [String: Any])?["events"]
+                as? [[String: Any]])
+        let row = try #require(rows.first)
+        #expect(row["value"] as? String == "token \(secret) end")
+        #expect(row["window_title"] as? String == "Report \(secret)")
+        #expect(row["url"] as? String == "https://ex.com/?token=\(secret)")
+        // The warning goes to stderr only, so `--json` stdout stays parseable.
+        #expect(
+            raw.stderr.contains(
+                "warning: --ignore-privacy returns stored text unredacted"))
+        #expect(!raw.stdout.contains("warning:"))
+    }
+
+    @Test func exportIgnorePrivacyReturnsStoredTextUnredactedAndWarnsOnStderr() async throws {
+        let (env, secret) = try await seededWithARawSecret()
+
+        let redacted = try CLIRunner.run(["export", "--since", "0"], env: env)
+        #expect(redacted.status == 0, "\(redacted.stderr)")
+        #expect(!redacted.stdout.contains(secret))
+
+        let raw = try CLIRunner.run(["export", "--since", "0", "--ignore-privacy"], env: env)
+        #expect(raw.status == 0, "\(raw.stderr)")
+        #expect(raw.stdout.contains(secret))
+        #expect(
+            raw.stderr.contains(
+                "warning: --ignore-privacy returns stored text unredacted"))
+        // The JSONL body itself never carries the warning — it stays machine-readable.
+        for line in raw.stdout.split(separator: "\n") {
+            _ = try JSONSerialization.jsonObject(with: Data(line.utf8))
+        }
+    }
+
+    /// Privacy fix round 5, P1: `openrhyme privacy` tells a worried user to audit their store
+    /// with `openrhyme events --since 7d --ignore-privacy`, and that command's stderr warning
+    /// promises "any secret in the store is printed in the clear". The human renderer printed a
+    /// single column — `window_title ?? element_title ?? value.prefix(60)` — so on a row that
+    /// *has* a window title (the ordinary case) `url`, `document`, `value` and `selected_text`
+    /// were never shown at all. Following our own instruction and grepping the output therefore
+    /// came back empty while the secret sat in the file: the exact false-confidence defect this
+    /// whole slice exists to prevent, reintroduced by the sentence added to prevent it.
+    ///
+    /// The row below is deliberately the shape that made the bug invisible: the secret is in
+    /// `url` and in `value`, on a row that also carries a window title.
+    @Test func ignorePrivacyHumanOutputRevealsEveryStoredTextColumnNotJustTheTitle() async throws {
+        let secret = "AKIAQQQQWWWWEEEERRRR"
+        let dir = try CLIRunner.tempDataDir()
+        let store = try EventStore(url: dir.appendingPathComponent("events.sqlite"))
+        try await store.append(
+            RawEvent(
+                ts: 100, kind: .contextSnapshot, bundleID: "com.apple.Safari",
+                windowTitle: "Quarterly report",  // present — this is what hid everything else
+                document: "/Users/me/keys/\(secret).txt",
+                url: "https://ex.com/callback?token=\(secret)",
+                elementTitle: "Body",
+                value: "aws key \(secret) trailing",
+                selectedText: "\(secret)",
+                extra: ["previousTitle": .string("Draft \(secret)")]))
+        await store.close()
+        let env = ["OPENRHYME_DATA_DIR": dir.path]
+
+        // Exactly the command `openrhyme privacy` recommends: human output, no --json.
+        let raw = try CLIRunner.run(["events", "--since", "0", "--ignore-privacy"], env: env)
+        #expect(raw.status == 0, "\(raw.stderr)")
+        #expect(raw.stderr.contains("any secret in the store is printed in the clear"))
+        #expect(
+            raw.stdout.contains(secret),
+            "the command the product recommends must actually surface the secret")
+        #expect(raw.stdout.contains("url: https://ex.com/callback?token=\(secret)"))
+        #expect(raw.stdout.contains("value: aws key \(secret) trailing"))
+        #expect(raw.stdout.contains("selected_text: \(secret)"))
+        #expect(raw.stdout.contains("document: /Users/me/keys/\(secret).txt"))
+        #expect(raw.stdout.contains("element_title: Body"))
+        #expect(raw.stdout.contains("window_title: Quarterly report"))
+        // `extra.previousTitle` is captured text too (`EventRedaction` redacts it), so the
+        // unredacted view has to show it or the promise is still only mostly true.
+        #expect(raw.stdout.contains("extra.previousTitle: Draft \(secret)"))
+        // The warning stays on stderr; stdout is still one summary line per event plus columns.
+        #expect(!raw.stdout.contains("warning:"))
+        #expect(raw.stdout.contains("context.snapshot  com.apple.Safari  Quarterly report"))
+
+        // Without the flag nothing changes: still redacted, still one line per event.
+        let redacted = try CLIRunner.run(["events", "--since", "0"], env: env)
+        #expect(redacted.status == 0, "\(redacted.stderr)")
+        #expect(!redacted.stdout.contains(secret))
+        #expect(redacted.stdout.split(separator: "\n").count == 1)
+        #expect(!redacted.stdout.contains("value:"))
+    }
+
+    @Test func maxValueCharsTruncatesAndZeroMeansFull() async throws {
+        let dir = try CLIRunner.tempDataDir()
+        let store = try EventStore(url: dir.appendingPathComponent("events.sqlite"))
+        try await store.append(
+            RawEvent(
+                ts: 100, kind: .contextSnapshot, bundleID: "com.apple.TextEdit",
+                value: String(repeating: "x", count: 5000)))
+        await store.close()
+        let env = ["OPENRHYME_DATA_DIR": dir.path]
+
+        let capped = try CLIRunner.run(
+            ["events", "--since", "0", "--max-value-chars", "10", "--json"], env: env)
+        #expect(capped.status == 0, "\(capped.stderr)")
+        let cappedRows = try #require(
+            (try CLIRunner.json(capped.stdout)["data"] as? [String: Any])?["events"]
+                as? [[String: Any]])
+        #expect((cappedRows.first?["value"] as? String)?.count == 10)
+
+        let full = try CLIRunner.run(
+            ["events", "--since", "0", "--max-value-chars", "0", "--json"], env: env)
+        #expect(full.status == 0, "\(full.stderr)")
+        let fullRows = try #require(
+            (try CLIRunner.json(full.stdout)["data"] as? [String: Any])?["events"]
+                as? [[String: Any]])
+        #expect((fullRows.first?["value"] as? String)?.count == 5000)
+    }
+
+    /// Export is a read path too — the same projection `events` applies must not be skipped
+    /// here just because the JSONL writer is a different code path.
+    @Test func exportRedactsSecretsAtReadTime() async throws {
+        let dir = try CLIRunner.tempDataDir()
+        let store = try EventStore(url: dir.appendingPathComponent("events.sqlite"))
+        try await store.append(
+            RawEvent(
+                ts: 100, kind: .contextSnapshot, bundleID: "com.apple.TextEdit",
+                value: "token AKIAQQQQWWWWEEEERRRR end"))
+        await store.close()
+        let env = ["OPENRHYME_DATA_DIR": dir.path]
+
+        let result = try CLIRunner.run(["export", "--since", "0"], env: env)
+        #expect(result.status == 0, "\(result.stderr)")
+        #expect(result.stdout.contains(#""value":"token [redacted:aws-key] end""#))
+        #expect(!result.stdout.contains("AKIAQQQQWWWWEEEERRRR"))
+    }
+
+    // MARK: - J8 (privacy fix round 1): read-time redaction covers every text-bearing column,
+    // not just `value`/`selected_text` — a credential is just as real leaked in a URL query
+    // string as it is in `value`.
+
+    @Test func eventsRedactsSecretsInURLDocumentWindowTitleAndElementTitle() async throws {
+        let dir = try CLIRunner.tempDataDir()
+        let store = try EventStore(url: dir.appendingPathComponent("events.sqlite"))
+        try await store.append(
+            RawEvent(
+                ts: 100, kind: .contextSnapshot, bundleID: "com.apple.Safari",
+                windowTitle: "token AKIAQQQQWWWWEEEERRRR here",
+                document: "/tmp/AKIAQQQQWWWWEEEERRRR.txt",
+                url: "https://ex.com/?token=AKIAQQQQWWWWEEEERRRR",
+                elementTitle: "field AKIAQQQQWWWWEEEERRRR"))
+        await store.close()
+        let env = ["OPENRHYME_DATA_DIR": dir.path]
+
+        let result = try CLIRunner.run(["events", "--since", "0", "--json"], env: env)
+        #expect(result.status == 0, "\(result.stderr)")
+        let rows = try #require(
+            (try CLIRunner.json(result.stdout)["data"] as? [String: Any])?["events"]
+                as? [[String: Any]])
+        let row = try #require(rows.first)
+        #expect(row["window_title"] as? String == "token [redacted:aws-key] here")
+        #expect(row["document"] as? String == "/tmp/[redacted:aws-key].txt")
+        #expect(row["url"] as? String == "https://ex.com/?token=[redacted:aws-key]")
+        #expect(row["element_title"] as? String == "field [redacted:aws-key]")
+    }
+
+    /// Read-time redaction only ever changes what is *returned* — it must never write back to
+    /// the store, so capture-time artifacts computed from the original, unredacted text
+    /// (`extra.fingerprint`, a value hash) are unaffected by what a later read redacts.
+    @Test func redactionAtReadTimeNeverAffectsStoredFingerprintOrHashArtifacts() async throws {
+        let dir = try CLIRunner.tempDataDir()
+        let store = try EventStore(url: dir.appendingPathComponent("events.sqlite"))
+        try await store.append(
+            RawEvent(
+                ts: 100, kind: .contextSnapshot, bundleID: "com.apple.TextEdit",
+                value: "token AKIAQQQQWWWWEEEERRRR end",
+                extra: ["fingerprint": "abc123", "valueHash": "def456"]))
+        await store.close()
+        let env = ["OPENRHYME_DATA_DIR": dir.path]
+
+        let result = try CLIRunner.run(["events", "--since", "0", "--json"], env: env)
+        #expect(result.status == 0, "\(result.stderr)")
+        let rows = try #require(
+            (try CLIRunner.json(result.stdout)["data"] as? [String: Any])?["events"]
+                as? [[String: Any]])
+        let row = try #require(rows.first)
+        #expect(row["value"] as? String == "token [redacted:aws-key] end")
+        let extra = try #require(row["extra"] as? [String: Any])
+        #expect(extra["fingerprint"] as? String == "abc123")
+        #expect(extra["valueHash"] as? String == "def456")
+
+        // And the store itself was never touched — reading again (or exporting) sees the exact
+        // same raw, unredacted bytes underneath.
+        let raw = try EventStore(
+            url: dir.appendingPathComponent("events.sqlite"), readOnly: true)
+        let stored = try await raw.query(EventQuery(since: 0))
+        await raw.close()
+        #expect(stored.first?.value == "token AKIAQQQQWWWWEEEERRRR end")
+    }
+
+    // MARK: - S3 (privacy fix round 3): read-time redaction must also cover
+    // `extra.previousTitle` — `HeartbeatDiff` copies the prior window title into it verbatim on
+    // a `window.title_changed` row, so a secret redacted out of `window_title` on one row was
+    // otherwise still sitting in plain text right next to it, in `extra`, on that very row.
+
+    @Test func eventsAndExportRedactSecretsInExtraPreviousTitleWithoutTouchingHashes()
+        async throws
+    {
+        let dir = try CLIRunner.tempDataDir()
+        let store = try EventStore(url: dir.appendingPathComponent("events.sqlite"))
+        try await store.append(
+            RawEvent(
+                ts: 100, kind: .windowTitleChanged, bundleID: "com.apple.Safari",
+                windowTitle: "new title [redacted:aws-key]",
+                extra: [
+                    "reason": "titleChanged",
+                    "previousTitle": "prev title AKIAQQQQWWWWEEEERRRR",
+                    "fingerprint": "abc123", "valueHash": "def456",
+                ]))
+        await store.close()
+        let env = ["OPENRHYME_DATA_DIR": dir.path]
+
+        let eventsResult = try CLIRunner.run(["events", "--since", "0", "--json"], env: env)
+        #expect(eventsResult.status == 0, "\(eventsResult.stderr)")
+        let eventsRows = try #require(
+            (try CLIRunner.json(eventsResult.stdout)["data"] as? [String: Any])?["events"]
+                as? [[String: Any]])
+        let eventsExtra = try #require(eventsRows.first?["extra"] as? [String: Any])
+        #expect(eventsExtra["previousTitle"] as? String == "prev title [redacted:aws-key]")
+        #expect(eventsExtra["fingerprint"] as? String == "abc123")
+        #expect(eventsExtra["valueHash"] as? String == "def456")
+
+        let exportResult = try CLIRunner.run(["export", "--since", "0"], env: env)
+        #expect(exportResult.status == 0, "\(exportResult.stderr)")
+        #expect(
+            exportResult.stdout.contains(#""previousTitle":"prev title [redacted:aws-key]""#))
+        #expect(exportResult.stdout.contains(#""fingerprint":"abc123""#))
+        #expect(exportResult.stdout.contains(#""valueHash":"def456""#))
+        #expect(!exportResult.stdout.contains("AKIAQQQQWWWWEEEERRRR"))
+    }
+
+    // MARK: - J9 (privacy fix round 1): a corrupt config.json must fail closed with a mapped
+    // error, not leak a raw DecodingError as an unmapped internal_error.
+
+    @Test func eventsWithACorruptConfigFailsClosedWithAMappedError() async throws {
+        let dir = try CLIRunner.tempDataDir()
+        try Data("{not valid json".utf8).write(to: dir.appendingPathComponent("config.json"))
+        let result = try CLIRunner.run(
+            ["events", "--since", "0", "--json"], env: ["OPENRHYME_DATA_DIR": dir.path])
+        #expect(result.status != 0)
+        let error = try #require(
+            (try CLIRunner.json(result.stdout)["error"] as? [String: Any]))
+        #expect(error["code"] as? String == "config_invalid")
+        #expect(!(error["message"] as? String ?? "").isEmpty)
+    }
+
+    @Test func exportWithACorruptConfigFailsClosedWithAMappedError() async throws {
+        let dir = try CLIRunner.tempDataDir()
+        try Data("{not valid json".utf8).write(to: dir.appendingPathComponent("config.json"))
+        let result = try CLIRunner.run(
+            ["export", "--since", "0"], env: ["OPENRHYME_DATA_DIR": dir.path])
+        #expect(result.status != 0)
+        #expect(
+            result.stderr.contains("config_invalid") || result.stderr.contains("not valid JSON"))
+    }
+
+    // MARK: - J11: `--max-value-chars` help says "0 = full" — a negative value is not a third
+    // meaning and must be rejected, not silently treated as full.
+
+    /// Privacy fix round 2, S6: this used the *space-separated* form, which ArgumentParser
+    /// rejects at parse time as a missing option value — before `EventsCommand.validate()` is
+    /// ever reached — so it exited 2 on the unfixed code too and tested nothing. The `=` form
+    /// (how a script that computed a negative budget emits it) is what actually reaches
+    /// `validate()`, and the store is seeded so that without the fix the command would succeed
+    /// and return the full value rather than fail for some unrelated reason.
+    @Test func negativeMaxValueCharsIsRejected() async throws {
+        let dir = try CLIRunner.tempDataDir()
+        let store = try EventStore(url: dir.appendingPathComponent("events.sqlite"))
+        try await store.append(
+            RawEvent(
+                ts: 100, kind: .contextSnapshot, bundleID: "com.apple.TextEdit",
+                value: String(repeating: "x", count: 50)))
+        await store.close()
+
+        let result = try CLIRunner.run(
+            ["events", "--since", "0", "--max-value-chars=-1", "--json"],
+            env: ["OPENRHYME_DATA_DIR": dir.path])
+        #expect(result.status == 2 || result.status == 64)  // ArgumentParser uses EX_USAGE
+        #expect(
+            result.stderr.contains("--max-value-chars must be >= 0"),
+            "expected the validation message, got: \(result.stderr)\(result.stdout)")
+    }
+
+    // MARK: - J12: when `--max-value-chars` actually cuts `value`/`selected_text`,
+    // `extra.valueTruncated` says so. (Ruling R32: the default was changed 2000 → 0 in this same
+    // fix round — see Task 12 docs — so this comment no longer claims otherwise.)
+
+    @Test func truncatedValueIsFlaggedInExtraButAFullValueIsNot() async throws {
+        let dir = try CLIRunner.tempDataDir()
+        let store = try EventStore(url: dir.appendingPathComponent("events.sqlite"))
+        try await store.append(
+            RawEvent(
+                ts: 100, kind: .contextSnapshot, bundleID: "com.apple.TextEdit",
+                value: String(repeating: "x", count: 20)))
+        try await store.append(
+            RawEvent(
+                ts: 200, kind: .contextSnapshot, bundleID: "com.apple.TextEdit",
+                value: "short"))
+        await store.close()
+        let env = ["OPENRHYME_DATA_DIR": dir.path]
+
+        let result = try CLIRunner.run(
+            ["events", "--since", "0", "--max-value-chars", "10", "--json"], env: env)
+        #expect(result.status == 0, "\(result.stderr)")
+        let rows = try #require(
+            (try CLIRunner.json(result.stdout)["data"] as? [String: Any])?["events"]
+                as? [[String: Any]])
+        #expect(rows.count == 2)
+        let truncatedRow = try #require(rows.first { ($0["value"] as? String)?.count == 10 })
+        #expect((truncatedRow["extra"] as? [String: Any])?["valueTruncated"] as? Bool == true)
+        let shortRow = try #require(rows.first { $0["value"] as? String == "short" })
+        #expect((shortRow["extra"] as? [String: Any])?["valueTruncated"] == nil)
+    }
+
+    @Test func maxValueCharsZeroNeverFlagsTruncationEvenForALongValue() async throws {
+        let dir = try CLIRunner.tempDataDir()
+        let store = try EventStore(url: dir.appendingPathComponent("events.sqlite"))
+        try await store.append(
+            RawEvent(
+                ts: 100, kind: .contextSnapshot, bundleID: "com.apple.TextEdit",
+                value: String(repeating: "x", count: 5000)))
+        await store.close()
+        let env = ["OPENRHYME_DATA_DIR": dir.path]
+
+        let result = try CLIRunner.run(
+            ["events", "--since", "0", "--max-value-chars", "0", "--json"], env: env)
+        #expect(result.status == 0, "\(result.stderr)")
+        let rows = try #require(
+            (try CLIRunner.json(result.stdout)["data"] as? [String: Any])?["events"]
+                as? [[String: Any]])
+        #expect((rows.first?["extra"] as? [String: Any])?["valueTruncated"] == nil)
     }
 }

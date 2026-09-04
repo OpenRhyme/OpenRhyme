@@ -6,6 +6,7 @@ import Foundation
 /// flicker and counter changes never register as a change.
 public struct ContextSignature: Sendable, Equatable {
     public var pid: Int32
+    public var protectedBy: String?
     public var windowTitle: String?
     public var document: String?
     public var url: String?
@@ -105,11 +106,13 @@ public enum HeartbeatDiff {
         public var trigger: Trigger
         public var input: InputClass?
         public var contentMemorySeconds: Double
+        public var policy: PrivacyPolicy
 
         public init(
             frontmost: AppInfo?, context: FocusedContext?, allowlist: Set<String>,
             recordOtherApps: Bool, maxValueBytes: Int, now: Double, trigger: Trigger = .heartbeat,
-            input: InputClass? = nil, contentMemorySeconds: Double = 1800
+            input: InputClass? = nil, contentMemorySeconds: Double = 1800,
+            policy: PrivacyPolicy
         ) {
             self.frontmost = frontmost
             self.context = context
@@ -120,6 +123,7 @@ public enum HeartbeatDiff {
             self.trigger = trigger
             self.input = input
             self.contentMemorySeconds = contentMemorySeconds
+            self.policy = policy
         }
     }
 
@@ -160,8 +164,23 @@ public enum HeartbeatDiff {
             return Output(events: events, state: state)
         }
 
+        // Privacy §5.5: a protected context yields an app-level marker and nothing else. The
+        // signature is (pid, protectedBy), so consecutive protected reads dedup to one row.
+        if case .protected(let rule) = context.protection {
+            let signature = ContextSignature(pid: app.pid, protectedBy: rule)
+            if appChanged || signature != state.signature {
+                events.append(
+                    protectedMarker(
+                        app: app, rule: rule, reason: input.trigger.reason, now: input.now))
+            }
+            state.signature = signature
+            state.lastWindowTitle = nil
+            return Output(events: events, state: state)
+        }
+
         let element = context.element
-        let redacted = Redaction.apply(element, maxValueBytes: input.maxValueBytes)
+        let redacted = Redaction.apply(
+            element, maxValueBytes: input.maxValueBytes, policy: input.policy)
         let hash = redacted.value.map(Hashing.sha256Hex)
         var signature = ContextSignature(
             pid: app.pid, windowTitle: TitleNormalizer.normalize(context.window?.title),
@@ -202,20 +221,34 @@ public enum HeartbeatDiff {
             if let textSource = element?.textSource {
                 extra["textSource"] = .string(textSource)
             }
+            if !redacted.redactedRules.isEmpty {
+                extra["redacted"] = .array(redacted.redactedRules.map(JSONValue.string))
+            }
             if case .observer(.titleChanged) = input.trigger,
                 let previousTitle = previous.lastWindowTitle
             {
                 extra["previousTitle"] = .string(previousTitle)
             }
-            events.append(
-                RawEvent(
-                    ts: input.now, kind: input.trigger.kind, pid: app.pid, bundleID: app.bundleID,
-                    appName: app.name, windowTitle: context.window?.title,
-                    document: context.window?.document, url: context.window?.url,
-                    role: element?.role, subrole: element?.subrole,
-                    identifier: element?.identifier, elementTitle: element?.title,
-                    value: valueUnchanged ? nil : redacted.value,
-                    selectedText: redacted.selectedText, extra: extra))
+            var event = RawEvent(
+                ts: input.now, kind: input.trigger.kind, pid: app.pid, bundleID: app.bundleID,
+                appName: app.name, windowTitle: context.window?.title,
+                document: context.window?.document, url: context.window?.url,
+                role: element?.role, subrole: element?.subrole,
+                identifier: element?.identifier, elementTitle: element?.title,
+                value: valueUnchanged ? nil : redacted.value,
+                selectedText: redacted.selectedText, extra: extra)
+            // Whole-branch review H2: the row's remaining text columns — window title,
+            // document, URL, element title and `extra.previousTitle` — get the same secret
+            // redaction `value`/`selected_text` already had, so nothing is written to disk in
+            // the clear that a read would have hidden. Deliberately last: `signature`,
+            // `extra.fingerprint` and `extra.valueHash` above are all computed from the raw
+            // text, so dedup and the Compact grouping key are unchanged by this.
+            let alsoRedacted = EventRedaction.apply(to: &event, policy: input.policy)
+            if !alsoRedacted.isEmpty {
+                let rules = Set(redacted.redactedRules).union(alsoRedacted).sorted()
+                event.extra?["redacted"] = .array(rules.map(JSONValue.string))
+            }
+            events.append(event)
             if !valueUnchanged, let hash {
                 state.recentHashes[app.pid, default: RecentValueHashes()].insert(
                     hash, now: input.now, ttl: input.contentMemorySeconds)
@@ -225,6 +258,26 @@ public enum HeartbeatDiff {
         state.lastWindowTitle = context.window?.title
         state.pruneRecentHashes(now: input.now, ttl: input.contentMemorySeconds)
         return Output(events: events, state: state)
+    }
+
+    /// Privacy §5.5: the app-level marker a protected context yields — no window title,
+    /// document, url, element or value, and a fingerprint over the bundle id alone. Defined once
+    /// and shared by the heartbeat/observer diff and by the menu path (whole-branch review C1),
+    /// so the two can never drift into disagreeing about what "recorded nothing" looks like.
+    static func protectedMarker(
+        app: AppInfo, rule: String, reason: String, now: Double
+    ) -> RawEvent {
+        RawEvent(
+            ts: now, kind: .contextSnapshot, pid: app.pid, bundleID: app.bundleID,
+            appName: app.name,
+            extra: [
+                "reason": .string(reason),
+                "protected": .bool(true),
+                "protectedBy": .string(rule),
+                "fingerprint": .string(
+                    Fingerprint.compute(
+                        bundleID: app.bundleID, windowTitle: nil, document: nil, url: nil)),
+            ])
     }
 
     private static func appEvent(
