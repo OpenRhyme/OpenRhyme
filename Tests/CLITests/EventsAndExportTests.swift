@@ -59,8 +59,11 @@ import Testing
         #expect(result.status == 0, "\(result.stderr)")
         let lines = result.stdout.split(separator: "\n")
         #expect(lines.count == 3)
-        #expect(lines[0].hasPrefix(#"{"id":1,"ts":"#))
-        #expect(lines[1].contains(#""extra":{"reason":"heartbeat"}"#))
+        let firstLine = try #require(lines.first, "expected at least 1 line, got \(lines.count)")
+        let secondLine = try #require(
+            lines.dropFirst(1).first, "expected at least 2 lines, got \(lines.count)")
+        #expect(firstLine.hasPrefix(#"{"id":1,"ts":"#))
+        #expect(secondLine.contains(#""extra":{"reason":"heartbeat"}"#))
 
         let out = try CLIRunner.tempDataDir().appendingPathComponent("day.jsonl")
         let toFile = try CLIRunner.run(
