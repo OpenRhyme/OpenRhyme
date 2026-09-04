@@ -161,7 +161,10 @@ public enum HeartbeatDiff {
         }
 
         let element = context.element
-        let redacted = Redaction.apply(element, maxValueBytes: input.maxValueBytes)
+        // Input.policy arrives in Task 5; .disabled keeps this task's behaviour identical to
+        // every existing test until the policy is threaded through.
+        let redacted = Redaction.apply(
+            element, maxValueBytes: input.maxValueBytes, policy: .disabled)
         let hash = redacted.value.map(Hashing.sha256Hex)
         var signature = ContextSignature(
             pid: app.pid, windowTitle: TitleNormalizer.normalize(context.window?.title),
