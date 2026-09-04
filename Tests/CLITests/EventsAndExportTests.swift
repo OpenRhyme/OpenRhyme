@@ -70,6 +70,38 @@ import Testing
         #expect(try String(contentsOf: out, encoding: .utf8).split(separator: "\n").count == 3)
     }
 
+    /// Whole-branch review I8: an export holds the same content as the store, which is `0600`
+    /// (spec privacy §5.6). It used to land at the umask's `0644`, world-readable, right next to
+    /// it. Both the fresh file and a pre-existing looser one must end up owner-only.
+    @Test func exportToAFileIsOwnerOnly() async throws {
+        let env = try await seeded()
+        let dir = try CLIRunner.tempDataDir()
+
+        let fresh = dir.appendingPathComponent("fresh.jsonl")
+        let result = try CLIRunner.run(
+            ["export", "--since", "1d", "--out", fresh.path], env: env)
+        #expect(result.status == 0, "\(result.stderr)")
+        var mode =
+            try FileManager.default.attributesOfItem(atPath: fresh.path)[.posixPermissions]
+            as? NSNumber
+        #expect(mode?.int16Value == 0o600)
+
+        let existing = dir.appendingPathComponent("existing.jsonl")
+        FileManager.default.createFile(
+            atPath: existing.path, contents: Data("stale\n".utf8),
+            attributes: [.posixPermissions: NSNumber(value: Int16(0o644))])
+        let overwrite = try CLIRunner.run(
+            ["export", "--since", "1d", "--out", existing.path], env: env)
+        #expect(overwrite.status == 0, "\(overwrite.stderr)")
+        mode =
+            try FileManager.default.attributesOfItem(atPath: existing.path)[.posixPermissions]
+            as? NSNumber
+        #expect(mode?.int16Value == 0o600)
+        let text = try String(contentsOf: existing, encoding: .utf8)
+        #expect(!text.contains("stale"))
+        #expect(text.split(separator: "\n").count == 3)
+    }
+
     @Test func exportPagesInInsertionOrderEvenWithNonMonotonicTimestamps() async throws {
         let dir = try CLIRunner.tempDataDir()
         let store = try EventStore(url: dir.appendingPathComponent("events.sqlite"))

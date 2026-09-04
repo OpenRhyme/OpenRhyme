@@ -48,6 +48,55 @@ import Testing
                 == dir.appendingPathComponent("events.sqlite").path)
     }
 
+    /// Whole-branch review I4: a protect list written the natural way — a bare array — used to
+    /// be discarded in silence: no protection, no warning, and `openrhyme privacy` cheerfully
+    /// listed the defaults as if the user's rule were among them. It is now honoured as `add`
+    /// and reported on both surfaces.
+    @Test func privacyReportsAMisShapedProtectListInsteadOfSwallowingIt() async throws {
+        let dir = try CLIRunner.tempDataDir()
+        try """
+        {"schema":1,"allowlist":[],
+         "capture":{"retention_days":"30"},
+         "privacy":{"protected_bundle_ids":["com.example.MyVault"],
+                    "protected_url_patterns":"vault.example.com"}}
+        """.write(
+            to: dir.appendingPathComponent("config.json"), atomically: true,
+            encoding: .utf8)
+        let env = ["OPENRHYME_DATA_DIR": dir.path]
+
+        let jsonResult = try CLIRunner.run(["privacy", "--json"], env: env)
+        #expect(jsonResult.status == 0, "\(jsonResult.stderr)")
+        let data = try #require(try CLIRunner.json(jsonResult.stdout)["data"] as? [String: Any])
+        let warnings = try #require(data["config_warnings"] as? [String])
+        #expect(warnings.count == 3)
+        #expect(warnings.contains { $0.contains("protected_bundle_ids") })
+        #expect(warnings.contains { $0.contains("protected_url_patterns") })
+        #expect(warnings.contains { $0.contains("retention_days") })
+        // The bare array is honoured, so the rule the user wrote is really in force...
+        #expect(
+            (data["protected_bundle_ids"] as? [String])?.contains("com.example.MyVault") == true)
+        // ...while the shape nothing can be read from is not, which is what the warning says.
+        #expect(
+            (data["protected_url_patterns"] as? [String])?.contains("vault.example.com") == false)
+
+        let human = try CLIRunner.run(["privacy"], env: env)
+        #expect(human.status == 0, "\(human.stderr)")
+        #expect(human.stdout.contains("WARNING: privacy.protected_bundle_ids"))
+        #expect(human.stdout.contains("WARNING: privacy.protected_url_patterns"))
+        #expect(human.stdout.contains("WARNING: capture.retention_days"))
+    }
+
+    @Test func aWellFormedConfigReportsNoWarnings() async throws {
+        let dir = try await seeded()
+        let result = try CLIRunner.run(
+            ["privacy", "--json"], env: ["OPENRHYME_DATA_DIR": dir.path])
+        #expect(result.status == 0, "\(result.stderr)")
+        let data = try #require(try CLIRunner.json(result.stdout)["data"] as? [String: Any])
+        #expect((data["config_warnings"] as? [String])?.isEmpty == true)
+        let human = try CLIRunner.run(["privacy"], env: ["OPENRHYME_DATA_DIR": dir.path])
+        #expect(!human.stdout.contains("WARNING:"))
+    }
+
     @Test func humanOutputListsCountsAndTheRemovalHintWhenSomethingMatches() async throws {
         let dir = try await seeded()
         let result = try CLIRunner.run(["privacy"], env: ["OPENRHYME_DATA_DIR": dir.path])

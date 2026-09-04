@@ -43,6 +43,13 @@ struct PrivacyCommand: AsyncParsableCommand {
         /// Privacy fix round 1: `capture.retention_days` was reported by no command before this
         /// — `0` means unset/keep everything.
         let retentionDays: Int
+        /// Whole-branch review I4: parts of `config.json` that did not mean what the user
+        /// evidently intended — a protect list written as a bare array, a key whose shape could
+        /// not be read at all, a non-numeric `retention_days`. Empty when the config parsed
+        /// cleanly. The daemon logs the same strings (`Capturer.warnAboutConfig`); this is where
+        /// a user who never reads the log finds out that a rule they wrote is not the rule in
+        /// force.
+        let configWarnings: [String]
 
         // Top-level CLI `--json` output is snake_case (see `status`/`events`/`apps`), unlike the
         // event `extra` blob (camelCase) — these two conventions are already both established
@@ -61,6 +68,7 @@ struct PrivacyCommand: AsyncParsableCommand {
             case frontmostVerdict = "frontmost_verdict"
             case storedRowsMatchingRules = "stored_rows_matching_rules"
             case retentionDays = "retention_days"
+            case configWarnings = "config_warnings"
         }
     }
 
@@ -91,8 +99,23 @@ struct PrivacyCommand: AsyncParsableCommand {
                 frontmostApp: frontmostApp,
                 frontmostVerdict: frontmostVerdict,
                 storedRowsMatchingRules: storedRowsMatchingRules,
-                retentionDays: config.capture.retentionDays)
+                retentionDays: config.capture.retentionDays,
+                configWarnings: Self.configWarnings(for: config))
         }
+    }
+
+    /// I4: the config's own silent failures, in the same words the daemon logs. `retention_days`
+    /// belongs here too — this command prints `retention: off (keep forever)` from a value that
+    /// falls back to `0` when it was written as `"30"`, which is the same defect wearing a
+    /// different key.
+    static func configWarnings(for config: Config) -> [String] {
+        var warnings = config.privacy.configWarnings
+        if config.capture.retentionDaysInvalid {
+            warnings.append(
+                "capture.retention_days is not a whole number, so retention is off and nothing "
+                    + "is being swept. Write it unquoted, e.g. \"retention_days\": 30.")
+        }
+        return warnings
     }
 
     /// Evaluates the frontmost app's live context against the real policy. Reports honestly —
@@ -159,6 +182,12 @@ struct PrivacyCommand: AsyncParsableCommand {
         } else {
             lines.append(
                 "privacy: DISABLED — none of the rules below are being enforced right now")
+        }
+        // I4: directly under the enabled/disabled line, because everything printed below it is a
+        // description of the rules in force — and a warning here means one of the rules the user
+        // wrote is not among them.
+        for warning in result.configWarnings {
+            lines.append("WARNING: \(warning)")
         }
         lines.append("data dir: \(result.dataDir)")
         lines.append("db path:  \(result.dbPath)")

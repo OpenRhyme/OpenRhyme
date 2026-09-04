@@ -22,7 +22,16 @@ struct ExportCommand: AsyncParsableCommand {
             let store = try EventStore(url: paths.databaseURL, readOnly: true)
             let handle: FileHandle
             if let out {
-                FileManager.default.createFile(atPath: out, contents: nil)
+                // Whole-branch review I8: an export holds the same content as the store, so it
+                // gets the store's mode (spec privacy §5.6), not the umask's 0644. Created
+                // owner-only, and tightened afterwards as well so an already-existing,
+                // looser-permissioned target is not silently written into at 0644 — the same
+                // create-then-tighten pair `EventStore` uses.
+                let owner: [FileAttributeKey: Any] = [
+                    .posixPermissions: NSNumber(value: Int16(0o600))
+                ]
+                FileManager.default.createFile(atPath: out, contents: nil, attributes: owner)
+                try? FileManager.default.setAttributes(owner, ofItemAtPath: out)
                 handle = try FileHandle(forWritingTo: URL(fileURLWithPath: out))
             } else {
                 handle = FileHandle.standardOutput

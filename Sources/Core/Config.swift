@@ -11,6 +11,48 @@ public struct PrivacySettings: Sendable, Equatable {
     public var protectedWindowTitlePatterns: [String] = Self.defaultWindowTitlePatterns
     public var credentialFieldPatterns: [String] = Self.defaultCredentialFieldPatterns
 
+    /// Whole-branch review I4: list keys the user wrote as a bare JSON array —
+    /// `"protected_bundle_ids": ["com.example.MyVault"]` — instead of the documented
+    /// `{"add": [...], "remove": [...]}`. Accepted as `add` (see `resolve`) and reported, never
+    /// silently dropped. Parse diagnostic only, exactly like
+    /// `CaptureSettings.unknownNotificationNames`: not saved, not compared for equality.
+    public private(set) var listKeysWrittenAsArray: [String] = []
+    /// List keys whose value is neither an array nor an `add`/`remove` object, so nothing could
+    /// be read from them at all and the built-in defaults alone are in force. Same contract.
+    public private(set) var listKeysIgnored: [String] = []
+
+    /// I4: human-readable warnings about a mis-shaped `privacy` block, for the daemon log
+    /// (`Capturer.warnAboutConfig`) and `openrhyme privacy`. Empty when the block parsed cleanly.
+    /// A user who believes they are protected and is not must be told so on both surfaces.
+    public var configWarnings: [String] {
+        var out: [String] = []
+        if !listKeysWrittenAsArray.isEmpty {
+            out.append(
+                "privacy.\(listKeysWrittenAsArray.joined(separator: ", privacy.")) written as a "
+                    + "plain array: treated as \"add\", so the built-in defaults are still in "
+                    + "force alongside your entries. Write "
+                    + "{\"add\": [...], \"remove\": [...]} to say which you meant.")
+        }
+        if !listKeysIgnored.isEmpty {
+            out.append(
+                "privacy.\(listKeysIgnored.joined(separator: ", privacy.")) ignored: expected a "
+                    + "list or an {\"add\": [...], \"remove\": [...]} object. Only the built-in "
+                    + "defaults are in force for it — your entries protect nothing.")
+        }
+        return out
+    }
+
+    /// Diagnostics are parse-time signals, not settings: two configs that resolve to the same
+    /// rules are equal even if one of them was written in the bare-array form.
+    public static func == (lhs: PrivacySettings, rhs: PrivacySettings) -> Bool {
+        lhs.enabled == rhs.enabled && lhs.entropyRedaction == rhs.entropyRedaction
+            && lhs.protectedBundleIDs == rhs.protectedBundleIDs
+            && lhs.protectedURLPatterns == rhs.protectedURLPatterns
+            && lhs.protectedDocumentPatterns == rhs.protectedDocumentPatterns
+            && lhs.protectedWindowTitlePatterns == rhs.protectedWindowTitlePatterns
+            && lhs.credentialFieldPatterns == rhs.credentialFieldPatterns
+    }
+
     public static let defaultBundleIDs: Set<String> = [
         "com.1password.1password", "com.1password.7", "com.agilebits.onepassword7",
         "com.bitwarden.desktop", "com.lastpass.LastPass", "in.sinew.Enpass-Desktop",
@@ -45,22 +87,63 @@ public struct PrivacySettings: Sendable, Equatable {
         self.init()
         if let v = json[Self.keys.enabled]?.boolValue { enabled = v }
         if let v = json[Self.keys.entropy]?.boolValue { entropyRedaction = v }
+        var diagnostics = ListDiagnostics()
         protectedBundleIDs = Set(
-            Self.resolve(Array(Self.defaultBundleIDs), json[Self.keys.bundles]))
-        protectedURLPatterns = Self.resolve(Self.defaultURLPatterns, json[Self.keys.urls])
+            Self.resolve(
+                Array(Self.defaultBundleIDs), json[Self.keys.bundles], key: Self.keys.bundles,
+                into: &diagnostics))
+        protectedURLPatterns = Self.resolve(
+            Self.defaultURLPatterns, json[Self.keys.urls], key: Self.keys.urls, into: &diagnostics)
         protectedDocumentPatterns = Self.resolve(
-            Self.defaultDocumentPatterns, json[Self.keys.documents])
+            Self.defaultDocumentPatterns, json[Self.keys.documents], key: Self.keys.documents,
+            into: &diagnostics)
         protectedWindowTitlePatterns = Self.resolve(
-            Self.defaultWindowTitlePatterns, json[Self.keys.titles])
+            Self.defaultWindowTitlePatterns, json[Self.keys.titles], key: Self.keys.titles,
+            into: &diagnostics)
         credentialFieldPatterns = Self.resolve(
-            Self.defaultCredentialFieldPatterns, json[Self.keys.fields])
+            Self.defaultCredentialFieldPatterns, json[Self.keys.fields], key: Self.keys.fields,
+            into: &diagnostics)
+        listKeysWrittenAsArray = diagnostics.writtenAsArray
+        listKeysIgnored = diagnostics.ignored
+    }
+
+    /// I4: what `resolve` noticed about the shape of each list key, in declaration order.
+    private struct ListDiagnostics {
+        var writtenAsArray: [String] = []
+        var ignored: [String] = []
     }
 
     /// `defaults ∪ add \ remove`, order-stable: defaults first, then additions.
-    private static func resolve(_ defaults: [String], _ value: JSONValue?) -> [String] {
-        guard let object = value?.objectValue else { return defaults }
-        let add = object[keys.add]?.arrayValue?.compactMap(\.stringValue) ?? []
-        let remove = Set(object[keys.remove]?.arrayValue?.compactMap(\.stringValue) ?? [])
+    ///
+    /// Whole-branch review I4 — a bare array is **accepted as `add`**, not ignored. The natural
+    /// form `"protected_bundle_ids": ["com.example.MyVault"]` has two readings: "also protect
+    /// this" and "protect exactly this". Adding satisfies the first exactly and the second more
+    /// than fully, so on a privacy control it can only ever err towards protecting more. The
+    /// alternative — rejecting it loudly — leaves the user with the very fail-open outcome this
+    /// defect is about, just with a log line attached. The warning still fires either way,
+    /// because under the "exactly this" reading the defaults the user did not ask for are also
+    /// still in force and they have to be told that.
+    private static func resolve(
+        _ defaults: [String], _ value: JSONValue?, key: String,
+        into diagnostics: inout ListDiagnostics
+    ) -> [String] {
+        guard let value else { return defaults }
+        let add: [String]
+        var remove: Set<String> = []
+        if let object = value.objectValue {
+            if object[keys.add] == nil && object[keys.remove] == nil {
+                // An object with neither key is as silent a no-op as a bare array was.
+                diagnostics.ignored.append(key)
+            }
+            add = object[keys.add]?.arrayValue?.compactMap(\.stringValue) ?? []
+            remove = Set(object[keys.remove]?.arrayValue?.compactMap(\.stringValue) ?? [])
+        } else if let array = value.arrayValue {
+            diagnostics.writtenAsArray.append(key)
+            add = array.compactMap(\.stringValue)
+        } else {
+            diagnostics.ignored.append(key)
+            return defaults
+        }
         var out = defaults.filter { !remove.contains($0) }
         for item in add where !out.contains(item) && !remove.contains(item) { out.append(item) }
         return out
@@ -305,12 +388,32 @@ public struct Config: Sendable, Equatable {
         return Config(allowlist: allowlist, capture: capture, privacy: privacy, raw: raw)
     }
 
+    /// Whole-branch review I5: a command that only touches the allowlist must not rewrite — or
+    /// normalise — config the user wrote by hand. `openrhyme apps allow` used to turn
+    /// `"retention_days": "30"` into `0` and a hand-written protect list into
+    /// `{"add": [], "remove": []}`, silently erasing a protect rule from an unrelated command.
+    /// So each section is written back only when it actually differs from what was loaded, or
+    /// when it is absent from the file altogether (a first write, where materialising the
+    /// defaults is the documented behaviour). Otherwise the user's own bytes survive the round
+    /// trip untouched, quoting quirks, typos and unknown keys included.
     public func save(to url: URL) throws {
         var out = raw
         out["schema"] = .number(Double(Self.schema))
         out["allowlist"] = .array(allowlist.map(JSONValue.string))
-        out["capture"] = .object(capture.merged(into: raw["capture"]?.objectValue ?? [:]))
-        out["privacy"] = .object(privacy.merged(into: raw["privacy"]?.objectValue ?? [:]))
+        if let loaded = raw["capture"]?.objectValue {
+            if capture != CaptureSettings(json: loaded) {
+                out["capture"] = .object(capture.merged(into: loaded))
+            }
+        } else {
+            out["capture"] = .object(capture.merged(into: [:]))
+        }
+        if let loaded = raw["privacy"]?.objectValue {
+            if privacy != PrivacySettings(json: loaded) {
+                out["privacy"] = .object(privacy.merged(into: loaded))
+            }
+        } else {
+            out["privacy"] = .object(privacy.merged(into: [:]))
+        }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
         let data = try encoder.encode(JSONValue.object(out))

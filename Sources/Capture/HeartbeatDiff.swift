@@ -170,18 +170,8 @@ public enum HeartbeatDiff {
             let signature = ContextSignature(pid: app.pid, protectedBy: rule)
             if appChanged || signature != state.signature {
                 events.append(
-                    RawEvent(
-                        ts: input.now, kind: .contextSnapshot, pid: app.pid,
-                        bundleID: app.bundleID, appName: app.name,
-                        extra: [
-                            "reason": .string(input.trigger.reason),
-                            "protected": .bool(true),
-                            "protectedBy": .string(rule),
-                            "fingerprint": .string(
-                                Fingerprint.compute(
-                                    bundleID: app.bundleID, windowTitle: nil, document: nil,
-                                    url: nil)),
-                        ]))
+                    protectedMarker(
+                        app: app, rule: rule, reason: input.trigger.reason, now: input.now))
             }
             state.signature = signature
             state.lastWindowTitle = nil
@@ -257,6 +247,26 @@ public enum HeartbeatDiff {
         state.lastWindowTitle = context.window?.title
         state.pruneRecentHashes(now: input.now, ttl: input.contentMemorySeconds)
         return Output(events: events, state: state)
+    }
+
+    /// Privacy §5.5: the app-level marker a protected context yields — no window title,
+    /// document, url, element or value, and a fingerprint over the bundle id alone. Defined once
+    /// and shared by the heartbeat/observer diff and by the menu path (whole-branch review C1),
+    /// so the two can never drift into disagreeing about what "recorded nothing" looks like.
+    static func protectedMarker(
+        app: AppInfo, rule: String, reason: String, now: Double
+    ) -> RawEvent {
+        RawEvent(
+            ts: now, kind: .contextSnapshot, pid: app.pid, bundleID: app.bundleID,
+            appName: app.name,
+            extra: [
+                "reason": .string(reason),
+                "protected": .bool(true),
+                "protectedBy": .string(rule),
+                "fingerprint": .string(
+                    Fingerprint.compute(
+                        bundleID: app.bundleID, windowTitle: nil, document: nil, url: nil)),
+            ])
     }
 
     private static func appEvent(

@@ -98,8 +98,24 @@ public final class Capturer {
     }
 
     /// Spec 2026-09-03 §6.7: the notification families in force for an app.
+    ///
+    /// Whole-branch review C1: a protected app's menu item titles are content — "Copy Password
+    /// for github.com (work)" is precisely what `protected_bundle_ids` exists to keep out of the
+    /// store — so an app the policy protects by bundle id is never registered for menu
+    /// notifications at all. Not registering is cheaper than filtering and leaves no window in
+    /// which a queued notification can leak. Only the bundle-id rule can be decided without a
+    /// focused window; the URL/document/window-title rules are per-context and are enforced on
+    /// delivery instead (`menuProtection(of:)`). `reconcileObservers` re-registers whenever this
+    /// set changes, so a protect rule added by a config reload takes the observer away.
     func enabledKinds(for app: AppInfo) -> Set<ObservedKind> {
-        ObservedKind.kinds(fromConfig: config.capture.effectiveNotifications(for: app.bundleID))
+        var kinds = ObservedKind.kinds(
+            fromConfig: config.capture.effectiveNotifications(for: app.bundleID))
+        if case .protected = privacyPolicy.evaluateContext(
+            bundleID: app.bundleID, windowTitle: nil, document: nil, url: nil)
+        {
+            kinds.remove(.menuItemSelected)
+        }
+        return kinds
     }
 
     /// Spec 2026-09-03 §6.1. Every notification for the frontmost app is classified by input
@@ -116,11 +132,7 @@ public final class Capturer {
         switch change.kind {
         case .menuItemSelected:
             guard HeartbeatDiff.isAllowed(frontmost, config.allowlistSet) else { return }
-            emit(
-                RawEvent(
-                    ts: change.ts, kind: .menuItemSelected, pid: frontmost.pid,
-                    bundleID: frontmost.bundleID, appName: frontmost.name,
-                    elementTitle: change.menuTitle))
+            recordMenuSelection(change, of: frontmost)
         case .valueChanged:
             guard input == .user else { return }  // a ticking slider or timer: sampled instead
             scheduleRefresh(for: change.pid, freshRead: true, input: input)
@@ -130,6 +142,55 @@ public final class Capturer {
         case .focusedWindowChanged, .focusedElementChanged:
             dropPendingRefresh(for: change.pid)
             refresh(trigger: .observer(change.kind), freshRead: false, input: input)
+        }
+    }
+
+    /// Whole-branch review C1. The menu path is a capture path like any other and must clear the
+    /// same protect rules: a menu title carries content, and `File ▸ Open Recent` / `Window ▸ …`
+    /// list exactly the `.env` and `*.pem` paths the document rules exist to protect. A protected
+    /// context therefore yields the same content-free marker row every other path emits — never
+    /// the title — deduped on the shared `(pid, protectedBy)` signature, so a protected app the
+    /// heartbeat has already marked does not accrue a row per menu click.
+    private func recordMenuSelection(_ change: ObservedChange, of app: AppInfo) {
+        if case .protected(let rule) = menuProtection(of: app) {
+            let signature = ContextSignature(pid: app.pid, protectedBy: rule)
+            if state.signature != signature {
+                emit(
+                    HeartbeatDiff.protectedMarker(
+                        app: app, rule: rule, reason: "observer", now: change.ts))
+            }
+            state.signature = signature
+            state.lastWindowTitle = nil
+            return
+        }
+        emit(
+            RawEvent(
+                ts: change.ts, kind: .menuItemSelected, pid: app.pid, bundleID: app.bundleID,
+                appName: app.name, elementTitle: change.menuTitle))
+    }
+
+    /// The protect verdict for a menu selection. The bundle-id rule needs no window, so it is
+    /// checked first and for free (and normally never fires here — such an app has no menu
+    /// observer at all — but a notification can already be queued when a config reload adds the
+    /// rule). The URL/document/window-title rules do need a window, so they cost one focused
+    /// context read, taken only when such a rule is actually configured and reusing the content
+    /// cache so it stays an identity read. A read that fails leaves the context unverifiable and
+    /// fails closed, exactly as `AXClient.focusedContext` does for a windowless app.
+    private func menuProtection(of app: AppInfo) -> Protection {
+        let byBundleID = privacyPolicy.evaluateContext(
+            bundleID: app.bundleID, windowTitle: nil, document: nil, url: nil)
+        if case .protected = byBundleID { return byBundleID }
+        // Non-nil exactly when the policy is on and at least one window-dependent rule exists.
+        guard privacyPolicy.protectionForWindowlessContext() != nil else { return .open }
+        do {
+            return try ax.focusedContext(
+                of: app, reusing: lastContentCache[app.pid], policy: privacyPolicy
+            ).protection
+        } catch {
+            logger.warning(
+                "menu selection for pid \(app.pid) not recorded: context unverifiable (\(String(describing: error)))"
+            )
+            return .protected(rule: "unverifiable-context")
         }
     }
 
@@ -314,6 +375,11 @@ public final class Capturer {
             logger.warning(
                 "ignoring unknown capture.notifications names: \(self.config.capture.unknownNotificationNames.joined(separator: ", "))"
             )
+        }
+        // Whole-branch review I4: a mis-shaped privacy list used to be discarded in silence, so
+        // a user who wrote a protect rule the natural way got no protection and no signal.
+        for warning in config.privacy.configWarnings {
+            logger.warning("\(warning)")
         }
     }
 

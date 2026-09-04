@@ -405,10 +405,31 @@ import Testing
         #expect(events.map(\.kind) == [.permissionChanged, .appActivated, .contextSnapshot])
     }
 
-    @Test func menuSelectionEmitsTheTitleWithoutAContextRead() async throws {
+    /// Whole-branch review C1: the menu path used to record the title with no policy check at
+    /// all. It now clears the same protect rules as every other capture path, which costs one
+    /// focused-context read whenever a window-dependent rule is configured (the default).
+    @Test func menuSelectionEmitsTheTitleOnlyAfterThePolicyClearsTheContext() async throws {
         let fake = FakeAXClient()
         fake.show(safari, window: WindowInfo(title: "A"))
         let capturer = try makeCapturer(fake: fake)
+        capturer.tick()
+        let reads = fake.focusedContextCalls
+        capturer.handle(
+            change: ObservedChange(pid: 10, kind: .menuItemSelected, menuTitle: "Save", ts: 7))
+        #expect(fake.focusedContextCalls == reads + 1)
+        let events = await drain(capturer)
+        #expect(events.last?.kind == .menuItemSelected)
+        #expect(events.last?.elementTitle == "Save")
+        #expect(events.last?.ts == 7)
+        #expect(events.last?.bundleID == "com.apple.Safari")
+    }
+
+    /// The read is taken only when a rule that needs a window is actually configured, so the
+    /// original "menu selections are free" property survives wherever the policy cannot object.
+    @Test func menuSelectionSkipsThePolicyReadWhenNoWindowRuleCanApply() async throws {
+        let fake = FakeAXClient()
+        fake.show(safari, window: WindowInfo(title: "A"))
+        let capturer = try makeCapturer(fake: fake) { $0.privacy.enabled = false }
         capturer.tick()
         let reads = fake.focusedContextCalls
         capturer.handle(
@@ -417,8 +438,101 @@ import Testing
         let events = await drain(capturer)
         #expect(events.last?.kind == .menuItemSelected)
         #expect(events.last?.elementTitle == "Save")
-        #expect(events.last?.ts == 7)
-        #expect(events.last?.bundleID == "com.apple.Safari")
+    }
+
+    /// C1, the leak as the reviewer proved it live: Safari both allowlisted *and* protected by
+    /// bundle id still emitted `elementTitle = "Copy Password for github.com (work)"`. A
+    /// protected app must not even be registered for menu notifications, and a notification
+    /// that arrives anyway (one queued across a config reload) must record nothing.
+    @Test func menuNotificationsAreNeverRegisteredForABundleIDProtectedApp() async throws {
+        let fake = FakeAXClient()
+        fake.running = [safari]
+        fake.show(safari, window: WindowInfo(title: "1Password"))
+        let capturer = try makeCapturer(fake: fake) {
+            $0.privacy.protectedBundleIDs.insert("com.apple.Safari")
+        }
+        capturer.tick()
+        #expect(fake.observedKinds[10]?.contains(.menuItemSelected) == false)
+        #expect(fake.observedKinds[10]?.contains(.focusedWindowChanged) == true)
+
+        // Belt and braces: deliver one anyway, as a reload race would.
+        fake.deliver(
+            ObservedChange(
+                pid: 10, kind: .menuItemSelected,
+                menuTitle: "Copy Password for github.com (work)", ts: 7))
+        let events = await drain(capturer)
+        #expect(!events.map(\.kind).contains(.menuItemSelected))
+        #expect(!events.contains { $0.elementTitle?.contains("Password") == true })
+        let marker = try #require(events.last { $0.kind == .contextSnapshot })
+        #expect(marker.extra?["protectedBy"] == "bundle-id")
+    }
+
+    /// C1: `File ▸ Open Recent` and `Window ▸ …` carry exactly the `.env` and `*.pem` paths the
+    /// document rules exist to protect. A document rule cannot be evaluated at registration
+    /// time, so the gate has to hold on delivery — and it yields the same content-free marker
+    /// row every other capture path emits for a protected context.
+    @Test func menuSelectionInADocumentProtectedAppEmitsAMarkerNotTheTitle() async throws {
+        let fake = FakeAXClient()
+        fake.running = [textEdit]
+        fake.show(textEdit, window: WindowInfo(title: "notes.md", document: "/Users/me/notes.md"))
+        let capturer = try makeCapturer(fake: fake)
+        capturer.tick()  // an open context first, so the marker below cannot be a leftover
+        #expect(fake.observedKinds[20]?.contains(.menuItemSelected) == true)
+
+        fake.show(textEdit, window: WindowInfo(title: ".env", document: "/Users/me/proj/.env"))
+        capturer.handle(
+            change: ObservedChange(
+                pid: 20, kind: .menuItemSelected, menuTitle: "/Users/me/proj/.env", ts: 9))
+
+        let events = await drain(capturer)
+        #expect(!events.map(\.kind).contains(.menuItemSelected))
+        #expect(!events.contains { ($0.elementTitle ?? "").contains(".env") })
+        let marker = try #require(events.last)
+        #expect(marker.kind == .contextSnapshot)
+        #expect(marker.ts == 9)
+        #expect(marker.bundleID == "com.apple.TextEdit")
+        #expect(marker.extra?["protected"] == true)
+        #expect(marker.extra?["protectedBy"] == "document")
+        #expect(marker.document == nil)
+        #expect(marker.windowTitle == nil)
+        #expect(marker.value == nil)
+    }
+
+    /// C1: a context the daemon cannot read cannot be cleared, so the title is not recorded —
+    /// the same fail-closed rule `AXClient.focusedContext` applies to a windowless app.
+    @Test func menuSelectionIsNotRecordedWhenTheContextCannotBeRead() async throws {
+        let fake = FakeAXClient()
+        fake.show(safari, window: WindowInfo(title: "A"))
+        let capturer = try makeCapturer(fake: fake)
+        capturer.tick()
+        fake.errors[safari.pid] = .cannotComplete
+        capturer.handle(
+            change: ObservedChange(pid: 10, kind: .menuItemSelected, menuTitle: "Save", ts: 7))
+        let events = await drain(capturer)
+        #expect(!events.map(\.kind).contains(.menuItemSelected))
+        #expect(events.last?.extra?["protectedBy"] == "unverifiable-context")
+    }
+
+    /// C1: the registration gate has to follow a config reload, or an app protected after the
+    /// daemon started keeps its menu observer for the rest of the process's life.
+    @Test func addingAProtectRuleAtRuntimeTakesTheMenuObserverAway() throws {
+        let fake = FakeAXClient()
+        fake.running = [safari]
+        let capturer = try makeCapturer(fake: fake)
+        capturer.tick()
+        #expect(fake.observedKinds[10] == Set(ObservedKind.allCases))
+
+        var edited = capturer.config
+        edited.privacy.protectedBundleIDs.insert("com.apple.Safari")
+        try edited.save(to: capturer.paths.configURL)
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date(timeIntervalSinceNow: 10)],
+            ofItemAtPath: capturer.paths.configURL.path)
+
+        capturer.tick()  // reload → reconcile → re-register without the menu family
+        #expect(capturer.privacyPolicy.protectedBundleIDs.contains("com.apple.Safari"))
+        #expect(fake.observedKinds[10]?.contains(.menuItemSelected) == false)
+        #expect(fake.stopObservingCalls == [10])
     }
 
     @Test func menuSelectionIsIgnoredForANonAllowlistedFrontmostApp() async throws {
