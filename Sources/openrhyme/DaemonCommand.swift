@@ -76,10 +76,10 @@ struct DaemonCommand: AsyncParsableCommand {
         let consumer = Task.detached {
             for await event in events {
                 do {
-                    try await store.append(event)
+                    try await Self.appendWithRetry { try await store.append(event) }
                     if verbose { Output.stderr("\(event.kind.rawValue) \(event.bundleID ?? "")") }
                 } catch {
-                    logger.error("store append failed: \(String(describing: error))")
+                    logger.error("store append failed after retries: \(String(describing: error))")
                 }
             }
         }
@@ -92,5 +92,29 @@ struct DaemonCommand: AsyncParsableCommand {
         try await store.append(RawEvent(ts: Date().timeIntervalSince1970, kind: .daemonStopped))
         await store.close()
         Output.stderr("stopped")
+    }
+
+    /// A concurrent long-running write elsewhere (`purge`'s VACUUM, measured at ~2.09s) can hold
+    /// the write lock past SQLite's own 2s `busy_timeout`, so a bare `store.append` can transiently
+    /// fail even though nothing is really wrong with the store. Dropping it immediately on the
+    /// first failure silently and permanently loses the event; retrying forever would risk
+    /// blocking shutdown. This is bounded on both ends: a few attempts with a short backoff, then
+    /// give up and let the caller log the failure.
+    static func appendWithRetry(
+        attempts: Int = 3, initialDelay: Duration = .milliseconds(250),
+        sleep: (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
+        _ append: () async throws -> Void
+    ) async throws {
+        var delay = initialDelay
+        for attempt in 1...attempts {
+            do {
+                try await append()
+                return
+            } catch {
+                guard attempt < attempts else { throw error }
+                try? await sleep(delay)
+                delay *= 2
+            }
+        }
     }
 }

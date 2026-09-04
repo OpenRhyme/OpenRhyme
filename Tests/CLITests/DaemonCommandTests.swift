@@ -3,6 +3,7 @@ import Testing
 
 @testable import Core
 @testable import Store
+@testable import openrhyme
 
 @Suite struct DaemonCommandTests {
     private func launchDaemon(dataDir: URL) throws -> Process {
@@ -104,5 +105,40 @@ import Testing
         await store.close()
         #expect(events.first?.kind == .daemonStarted)
         #expect(events.last?.kind == .daemonStopped)
+    }
+
+    // MARK: - Bounded append retry (a concurrent `purge` VACUUM can hold the write lock past
+    // SQLite's busy_timeout; a transient failure must be retried, not silently dropped).
+
+    private func noSleep(_ delay: Duration) async throws {}
+
+    @Test func appendWithRetrySucceedsAfterTransientFailures() async throws {
+        var calls = 0
+        try await DaemonCommand.appendWithRetry(attempts: 3, sleep: noSleep) {
+            calls += 1
+            if calls < 3 { throw DatabaseError(code: 5, message: "database is locked") }
+        }
+        #expect(calls == 3, "must have retried instead of dropping the event on the first failure")
+    }
+
+    @Test func appendWithRetryGivesUpAfterExhaustingAttemptsInsteadOfRetryingForever()
+        async throws
+    {
+        var calls = 0
+        await #expect(throws: DatabaseError.self) {
+            try await DaemonCommand.appendWithRetry(attempts: 3, sleep: noSleep) {
+                calls += 1
+                throw DatabaseError(code: 5, message: "database is locked")
+            }
+        }
+        #expect(calls == 3, "bounded: must give up rather than retry forever")
+    }
+
+    @Test func appendWithRetryDoesNotRetryAfterASuccess() async throws {
+        var calls = 0
+        try await DaemonCommand.appendWithRetry(attempts: 3, sleep: noSleep) {
+            calls += 1
+        }
+        #expect(calls == 1)
     }
 }
