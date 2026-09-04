@@ -685,4 +685,56 @@ import Testing
         #expect(snapshot?.extra?["protected"] == nil)
         #expect(snapshot?.value == "ordinary page body")
     }
+
+    /// The defect this closes: `HeartbeatDiff.Input.policy` defaults to `.disabled`, so omitting
+    /// the argument at the call site compiles cleanly while silently killing every redaction rule
+    /// (only the unconditional secure-text-field guard would still fire). Driven through the
+    /// `Capturer`, not `Redaction`/`HeartbeatDiff` directly, so it proves the wiring, not just the
+    /// pure function.
+    @Test func aCredentialShapedSecretInCapturedTextIsRedactedThroughTheCapturer() async throws {
+        let fake = FakeAXClient()
+        fake.show(
+            safari, window: WindowInfo(title: "Notes"),
+            element: ElementInfo(role: "AXTextArea", value: "key AKIAQQQQWWWWEEEERRRR here"))
+        let capturer = try makeCapturer(fake: fake)
+        capturer.tick()
+        let events = await drain(capturer)
+        let snapshot = events.last { $0.kind == .contextSnapshot }
+        #expect(snapshot?.value == "key [redacted:aws-key] here")
+        #expect(snapshot?.extra?["redacted"] == .array([.string("aws-key")]))
+    }
+
+    /// The escape hatch: `privacy.enabled = false` must still skip redaction end-to-end.
+    @Test func redactionIsSkippedThroughTheCapturerWhenPrivacyIsDisabled() async throws {
+        let fake = FakeAXClient()
+        fake.show(
+            safari, window: WindowInfo(title: "Notes"),
+            element: ElementInfo(role: "AXTextArea", value: "key AKIAQQQQWWWWEEEERRRR here"))
+        let capturer = try makeCapturer(fake: fake) { $0.privacy.enabled = false }
+        capturer.tick()
+        let events = await drain(capturer)
+        let snapshot = events.last { $0.kind == .contextSnapshot }
+        #expect(snapshot?.value == "key AKIAQQQQWWWWEEEERRRR here")
+        #expect(snapshot?.extra?["redacted"] == nil)
+    }
+
+    @Test func policyIsRecompiledOnConfigReload() async throws {
+        let fake = FakeAXClient()
+        fake.show(safari, window: WindowInfo(title: "Docs"))
+        let capturer = try makeCapturer(fake: fake) { $0.privacy.protectedBundleIDs = [] }
+        capturer.tick()
+        #expect(capturer.privacyPolicy.protectedBundleIDs.isEmpty)
+        #expect(fake.lastPolicy?.protectedBundleIDs.isEmpty == true)
+
+        var edited = capturer.config
+        edited.privacy.protectedBundleIDs = ["com.apple.Safari"]
+        try edited.save(to: capturer.paths.configURL)
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date(timeIntervalSinceNow: 10)],
+            ofItemAtPath: capturer.paths.configURL.path)
+        capturer.tick()
+        #expect(capturer.privacyPolicy.protectedBundleIDs == ["com.apple.Safari"])
+        let events = await drain(capturer)
+        #expect(events.last?.extra?["protectedBy"] == "bundle-id")
+    }
 }

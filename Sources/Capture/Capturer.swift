@@ -11,6 +11,8 @@ public final class Capturer {
     public private(set) var trust: TrustState = .needsPermission
     public private(set) var state = LastKnownState()
     public private(set) var config: Config
+    /// Spec privacy §5.8: compiled once per config load and handed to every read.
+    public private(set) var privacyPolicy: PrivacyPolicy
     /// Consecutive failed context reads per pid (reset on success). A later slice turns this into
     /// `app.opaque` events.
     public private(set) var readFailures: [Int32: Int] = [:]
@@ -47,6 +49,7 @@ public final class Capturer {
         self.ax = ax
         self.paths = paths
         self.config = config
+        self.privacyPolicy = PrivacyPolicy(settings: config.privacy)
         self.now = now
         self.retryDelays = retryDelays
         self.configModified = Config.modificationDate(of: paths.configURL)
@@ -320,6 +323,7 @@ public final class Capturer {
         configModified = modified
         do {
             config = try Config.load(from: paths.configURL)
+            privacyPolicy = PrivacyPolicy(settings: config.privacy)
             logger.info("config reloaded: \(self.config.allowlist.count) allowlisted apps")
             warnAboutConfig()
             reconcileObservers()
@@ -379,7 +383,7 @@ public final class Capturer {
                 context = try ax.focusedContext(
                     of: frontmost,
                     reusing: freshRead ? nil : lastContentCache[frontmost.pid],
-                    policy: PrivacyPolicy(settings: config.privacy))
+                    policy: privacyPolicy)
                 readFailures[frontmost.pid] = nil
                 staleBackoff = 5
                 if let context { lastContentCache[frontmost.pid] = ax.cache(from: context) }
@@ -400,7 +404,8 @@ public final class Capturer {
                 frontmost: frontmost, context: context, allowlist: config.allowlistSet,
                 recordOtherApps: config.capture.recordOtherApps,
                 maxValueBytes: config.capture.maxValueBytes, now: now(), trigger: trigger,
-                input: input, contentMemorySeconds: config.capture.contentMemorySeconds))
+                input: input, contentMemorySeconds: config.capture.contentMemorySeconds,
+                policy: privacyPolicy))
         for event in output.events { emit(event) }
         let idle = state.idle
         let idleSince = state.idleSince
