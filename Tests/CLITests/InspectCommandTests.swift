@@ -48,7 +48,7 @@ import Testing
         let object =
             try JSONSerialization.jsonObject(with: JSONEncoder().encode(inspection))
             as? [String: Any]
-        #expect(object?["protectedBy"] as? String == "url")
+        #expect(object?["protected_by"] as? String == "url")
         #expect(object?["window"] == nil || object?["window"] is NSNull)
         #expect(object?["element"] == nil || object?["element"] is NSNull)
         #expect(object?["tree"] == nil || object?["tree"] is NSNull)
@@ -84,7 +84,7 @@ import Testing
         #expect(plain.status == 0, "\(plain.stderr)")
         #expect(plain.stderr.isEmpty)
         let plainData = try #require(try CLIRunner.json(plain.stdout)["data"] as? [String: Any])
-        #expect(plainData["protectedBy"] as? String == "bundle-id")
+        #expect(plainData["protected_by"] as? String == "bundle-id")
         #expect(plainData["window"] == nil || plainData["window"] is NSNull)
         #expect(plainData["element"] == nil || plainData["element"] is NSNull)
         #expect(plainData["tree"] == nil || plainData["tree"] is NSNull)
@@ -106,7 +106,7 @@ import Testing
             bypass.stderr.contains(
                 "warning: --ignore-privacy bypasses the protect rules for this read"))
         let bypassData = try #require(try CLIRunner.json(bypass.stdout)["data"] as? [String: Any])
-        #expect(bypassData["protectedBy"] == nil || bypassData["protectedBy"] is NSNull)
+        #expect(bypassData["protected_by"] == nil || bypassData["protected_by"] is NSNull)
         #expect(bypassData["window"] != nil && !(bypassData["window"] is NSNull))
     }
 }

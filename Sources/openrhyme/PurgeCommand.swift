@@ -30,6 +30,11 @@ struct PurgeCommand: AsyncParsableCommand {
         let deleted: Int
         let vacuumed: Bool
         let dryRun: Bool
+
+        enum CodingKeys: String, CodingKey {
+            case matched, deleted, vacuumed
+            case dryRun = "dry_run"
+        }
     }
 
     /// Pure selection so the matching rules are testable without a store. `--apply-rules`

@@ -434,7 +434,7 @@ import Testing
         var data = try CLIRunner.json(dry.stdout)["data"] as? [String: Any]
         #expect(data?["matched"] as? Int == 1)
         #expect(data?["deleted"] as? Int == 0)
-        #expect(data?["dryRun"] as? Bool == true)
+        #expect(data?["dry_run"] as? Bool == true)
 
         let store = try EventStore(
             url: dir.appendingPathComponent("events.sqlite"), readOnly: true)

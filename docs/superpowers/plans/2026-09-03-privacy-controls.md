@@ -1308,7 +1308,7 @@ Claude-Session: https://claude.ai/code/session_016CZ7A8EbQLY5eqaMWnXRq2"
 
 **Interfaces:**
 - Consumes: `EventStore.query/deleteEvents/vacuum` (Task 7), `PrivacyPolicy` (Task 1).
-- Produces: `openrhyme purge [--since] [--until] [--app] [--url-contains] [--apply-rules] [--all] [--dry-run] [--yes] [--json]`; JSON result `{matched: Int, deleted: Int, vacuumed: Bool, dryRun: Bool}`; `PurgeCommand.select(events:app:urlContains:applyRules:policy:) -> [RawEvent]` (pure, testable without a store).
+- Produces: `openrhyme purge [--since] [--until] [--app] [--url-contains] [--apply-rules] [--all] [--dry-run] [--yes] [--json]`; JSON result `{matched: Int, deleted: Int, vacuumed: Bool, dry_run: Bool}` (CLI `--json` output is snake_case; see the fix-round note on Task 9); `PurgeCommand.select(events:app:urlContains:applyRules:policy:) -> [RawEvent]` (pure, testable without a store).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1541,11 +1541,25 @@ Claude-Session: https://claude.ai/code/session_016CZ7A8EbQLY5eqaMWnXRq2"
         #expect(result.exitCode == 0)
         let data = try #require(result.jsonData)
         #expect(data["enabled"] as? Bool == true)
-        #expect((data["protectedBundleIDs"] as? [String])?.contains("com.1password.1password") == true)
-        #expect(data["storedRowsMatchingRules"] as? Int == 1)
+        #expect((data["protected_bundle_ids"] as? [String])?.contains("com.1password.1password") == true)
+        #expect(data["stored_rows_matching_rules"] as? Int == 1)
     }
 ```
 Match the shape of the existing CLI tests in `Tests/CLITests` for the runner and JSON decoding; do not invent a new harness.
+
+**Fix-round note (post-implementation):** the JSON key spellings above (`protectedBundleIDs`,
+`storedRowsMatchingRules`) were written camelCase in this brief and turned out to be wrong —
+verified empirically against the shipped CLI, top-level `--json` output is snake_case via
+explicit `CodingKeys` (`bundle_id`, `is_electron`, `attribute_names`, `daemon_running`,
+`data_dir`, `db_path`, `event_count`, `last_event_ts`, `opaque_apps`), while only the event
+`extra` blob is camelCase (`protectedBy`, `valueHash`, `textSource`, `fingerprint`,
+`previousTitle`, `valueUnchanged`). `PrivacyCommand.Result` ships with snake_case keys
+(`entropy_redaction`, `protected_bundle_ids`, `protected_url_patterns`,
+`protected_document_patterns`, `protected_window_title_patterns`, `credential_field_patterns`,
+`frontmost_app`, `frontmost_verdict`, `stored_rows_matching_rules`), `PurgeCommand.Result` ships
+`dry_run` (not `dryRun`), and `InspectCommand.Inspection` ships `protected_by` (not
+`protectedBy`) — the Swift-side struct/property names below are unaffected (they stay
+camelCase, per normal Swift style); only the `CodingKeys`-mapped wire format changed.
 
 - [ ] **Step 2: Run to verify it fails**
 
@@ -1571,7 +1585,7 @@ Expected: build error — no `PrivacyCommand`.
 ```
 Human output: one line per list with its count, the frontmost verdict, and — when `storedRowsMatchingRules > 0` — the sentence `N stored rows match the current rules; remove them with: openrhyme purge --apply-rules --yes`. This is where the spec's §7.3 notice lives (see the plan header's noted refinement).
 
-`Sources/openrhyme/InspectCommand.swift` — add `@Flag(name: .long, help: "Read even a protected context (prints a warning; never writes to the store).") var ignorePrivacy = false`, pass `policy: ignorePrivacy ? .disabled : PrivacyPolicy(settings: config.privacy)` to `focusedElementInspection`, and when `ignorePrivacy` is set write `Output.stderr("warning: --ignore-privacy bypasses the protect rules for this read")` before running. When the result has a non-nil `protectedBy`, the human output is `protected by rule '<rule>' — nothing read` and the JSON carries `protectedBy`.
+`Sources/openrhyme/InspectCommand.swift` — add `@Flag(name: .long, help: "Read even a protected context (prints a warning; never writes to the store).") var ignorePrivacy = false`, pass `policy: ignorePrivacy ? .disabled : PrivacyPolicy(settings: config.privacy)` to `focusedElementInspection`, and when `ignorePrivacy` is set write `Output.stderr("warning: --ignore-privacy bypasses the protect rules for this read")` before running. When the result has a non-nil `protectedBy`, the human output is `protected by rule '<rule>' — nothing read` and the JSON carries `protected_by` (snake_case, matching this command's other keys — see the fix-round note above; the Swift property itself is still named `protectedBy`).
 
 Register `PrivacyCommand.self` in `OpenRhyme.swift`.
 

@@ -31,6 +31,22 @@ struct PrivacyCommand: AsyncParsableCommand {
         /// a fabricated "open" for those cases.
         let frontmostVerdict: String?
         let storedRowsMatchingRules: Int
+
+        // Top-level CLI `--json` output is snake_case (see `status`/`events`/`apps`), unlike the
+        // event `extra` blob (camelCase) — these two conventions are already both established
+        // and must not be mixed within one command's envelope.
+        enum CodingKeys: String, CodingKey {
+            case enabled
+            case entropyRedaction = "entropy_redaction"
+            case protectedBundleIDs = "protected_bundle_ids"
+            case protectedURLPatterns = "protected_url_patterns"
+            case protectedDocumentPatterns = "protected_document_patterns"
+            case protectedWindowTitlePatterns = "protected_window_title_patterns"
+            case credentialFieldPatterns = "credential_field_patterns"
+            case frontmostApp = "frontmost_app"
+            case frontmostVerdict = "frontmost_verdict"
+            case storedRowsMatchingRules = "stored_rows_matching_rules"
+        }
     }
 
     func run() async throws {

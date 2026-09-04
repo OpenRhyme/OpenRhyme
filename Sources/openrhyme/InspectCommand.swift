@@ -27,8 +27,9 @@ struct InspectCommand: AsyncParsableCommand {
         let protectedBy: String?
 
         enum CodingKeys: String, CodingKey {
-            case app, window, element, tree, protectedBy
+            case app, window, element, tree
             case attributeNames = "attribute_names"
+            case protectedBy = "protected_by"
         }
     }
 

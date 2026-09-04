@@ -27,17 +27,17 @@ import Testing
         #expect(result.status == 0, "\(result.stderr)")
         let data = try #require(try CLIRunner.json(result.stdout)["data"] as? [String: Any])
         #expect(data["enabled"] as? Bool == true)
-        #expect(data["entropyRedaction"] as? Bool == true)
+        #expect(data["entropy_redaction"] as? Bool == true)
         #expect(
-            (data["protectedBundleIDs"] as? [String])?.contains("com.1password.1password") == true
-        )
-        #expect((data["protectedURLPatterns"] as? [String])?.contains("1password.com") == true)
-        #expect((data["protectedDocumentPatterns"] as? [String])?.contains(".env") == true)
-        #expect(
-            (data["protectedWindowTitlePatterns"] as? [String])?.contains("private browsing")
+            (data["protected_bundle_ids"] as? [String])?.contains("com.1password.1password")
                 == true)
-        #expect((data["credentialFieldPatterns"] as? [String])?.contains("password") == true)
-        #expect(data["storedRowsMatchingRules"] as? Int == 1)
+        #expect((data["protected_url_patterns"] as? [String])?.contains("1password.com") == true)
+        #expect((data["protected_document_patterns"] as? [String])?.contains(".env") == true)
+        #expect(
+            (data["protected_window_title_patterns"] as? [String])?.contains("private browsing")
+                == true)
+        #expect((data["credential_field_patterns"] as? [String])?.contains("password") == true)
+        #expect(data["stored_rows_matching_rules"] as? Int == 1)
     }
 
     @Test func humanOutputListsCountsAndTheRemovalHintWhenSomethingMatches() async throws {
@@ -72,7 +72,7 @@ import Testing
         let result = try CLIRunner.run(["privacy", "--json"], env: env)
         #expect(result.status == 0, "\(result.stderr)")
         let data = try #require(try CLIRunner.json(result.stdout)["data"] as? [String: Any])
-        #expect(data["storedRowsMatchingRules"] as? Int == 0)
+        #expect(data["stored_rows_matching_rules"] as? Int == 0)
         #expect(!FileManager.default.fileExists(atPath: dbURL.path))
 
         let humanResult = try CLIRunner.run(["privacy"], env: env)
