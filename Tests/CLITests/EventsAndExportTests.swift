@@ -110,4 +110,92 @@ import Testing
             (try CLIRunner.json(result.stdout)["error"] as? [String: Any])?["code"] as? String
                 == "usage")
     }
+
+    // MARK: - Read-time redaction (spec privacy §4/§5.7). Rows stored before a rule existed are
+    // the reason this exists: redaction is re-applied on every read, not just at capture time.
+
+    @Test func eventsRedactsSecretsAtReadTime() async throws {
+        let dir = try CLIRunner.tempDataDir()
+        let store = try EventStore(url: dir.appendingPathComponent("events.sqlite"))
+        // Seeded directly, bypassing capture-time redaction entirely — this is exactly what a
+        // row written before the rule existed looks like.
+        try await store.append(
+            RawEvent(
+                ts: 100, kind: .contextSnapshot, bundleID: "com.apple.TextEdit",
+                value: "token AKIAQQQQWWWWEEEERRRR end"))
+        await store.close()
+        let env = ["OPENRHYME_DATA_DIR": dir.path]
+
+        let result = try CLIRunner.run(["events", "--since", "0", "--json"], env: env)
+        #expect(result.status == 0, "\(result.stderr)")
+        let data = try CLIRunner.json(result.stdout)["data"] as? [String: Any]
+        let rows = try #require(data?["events"] as? [[String: Any]])
+        #expect(rows.first?["value"] as? String == "token [redacted:aws-key] end")
+    }
+
+    @Test func eventsDoesNotRedactWhenPrivacyIsDisabled() async throws {
+        let dir = try CLIRunner.tempDataDir()
+        let store = try EventStore(url: dir.appendingPathComponent("events.sqlite"))
+        try await store.append(
+            RawEvent(
+                ts: 100, kind: .contextSnapshot, bundleID: "com.apple.TextEdit",
+                value: "token AKIAQQQQWWWWEEEERRRR end"))
+        await store.close()
+        var settings = PrivacySettings()
+        settings.enabled = false
+        try Config(privacy: settings).save(to: dir.appendingPathComponent("config.json"))
+        let env = ["OPENRHYME_DATA_DIR": dir.path]
+
+        let result = try CLIRunner.run(["events", "--since", "0", "--json"], env: env)
+        #expect(result.status == 0, "\(result.stderr)")
+        let rows = try #require(
+            (try CLIRunner.json(result.stdout)["data"] as? [String: Any])?["events"]
+                as? [[String: Any]])
+        #expect(rows.first?["value"] as? String == "token AKIAQQQQWWWWEEEERRRR end")
+    }
+
+    @Test func maxValueCharsTruncatesAndZeroMeansFull() async throws {
+        let dir = try CLIRunner.tempDataDir()
+        let store = try EventStore(url: dir.appendingPathComponent("events.sqlite"))
+        try await store.append(
+            RawEvent(
+                ts: 100, kind: .contextSnapshot, bundleID: "com.apple.TextEdit",
+                value: String(repeating: "x", count: 5000)))
+        await store.close()
+        let env = ["OPENRHYME_DATA_DIR": dir.path]
+
+        let capped = try CLIRunner.run(
+            ["events", "--since", "0", "--max-value-chars", "10", "--json"], env: env)
+        #expect(capped.status == 0, "\(capped.stderr)")
+        let cappedRows = try #require(
+            (try CLIRunner.json(capped.stdout)["data"] as? [String: Any])?["events"]
+                as? [[String: Any]])
+        #expect((cappedRows.first?["value"] as? String)?.count == 10)
+
+        let full = try CLIRunner.run(
+            ["events", "--since", "0", "--max-value-chars", "0", "--json"], env: env)
+        #expect(full.status == 0, "\(full.stderr)")
+        let fullRows = try #require(
+            (try CLIRunner.json(full.stdout)["data"] as? [String: Any])?["events"]
+                as? [[String: Any]])
+        #expect((fullRows.first?["value"] as? String)?.count == 5000)
+    }
+
+    /// Export is a read path too — the same projection `events` applies must not be skipped
+    /// here just because the JSONL writer is a different code path.
+    @Test func exportRedactsSecretsAtReadTime() async throws {
+        let dir = try CLIRunner.tempDataDir()
+        let store = try EventStore(url: dir.appendingPathComponent("events.sqlite"))
+        try await store.append(
+            RawEvent(
+                ts: 100, kind: .contextSnapshot, bundleID: "com.apple.TextEdit",
+                value: "token AKIAQQQQWWWWEEEERRRR end"))
+        await store.close()
+        let env = ["OPENRHYME_DATA_DIR": dir.path]
+
+        let result = try CLIRunner.run(["export", "--since", "0"], env: env)
+        #expect(result.status == 0, "\(result.stderr)")
+        #expect(result.stdout.contains(#""value":"token [redacted:aws-key] end""#))
+        #expect(!result.stdout.contains("AKIAQQQQWWWWEEEERRRR"))
+    }
 }

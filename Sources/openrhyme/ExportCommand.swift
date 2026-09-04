@@ -1,4 +1,5 @@
 import ArgumentParser
+import Capture
 import Core
 import Foundation
 import Store
@@ -15,7 +16,10 @@ struct ExportCommand: AsyncParsableCommand {
         do {
             let sinceTS = try TimeSpec.parse(since)
             let untilTS = try until.map { try TimeSpec.parse($0) }
-            let store = try EventStore(url: Paths.resolve().databaseURL, readOnly: true)
+            let paths = Paths.resolve()
+            let config = try Config.load(from: paths.configURL)
+            let policy = PrivacyPolicy(settings: config.privacy)
+            let store = try EventStore(url: paths.databaseURL, readOnly: true)
             let handle: FileHandle
             if let out {
                 FileManager.default.createFile(atPath: out, contents: nil)
@@ -33,7 +37,11 @@ struct ExportCommand: AsyncParsableCommand {
                     EventQuery(
                         since: sinceTS, until: untilTS, limit: EventQuery.maxLimit, afterID: afterID
                     ))
-                for event in page {
+                // Export is a read path too (spec privacy §4/§5.7): the same projection
+                // `events` applies runs here, un-truncated (`maxValueChars: 0`) since export
+                // has no char-limit flag of its own.
+                let projected = EventsCommand.project(page, policy: policy, maxValueChars: 0)
+                for event in projected {
                     handle.write(Data((try JSONLExport.line(for: event) + "\n").utf8))
                 }
                 guard page.count == EventQuery.maxLimit, let last = page.last?.id else { break }
