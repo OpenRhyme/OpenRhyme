@@ -231,9 +231,15 @@ public struct PrivacySettings: Sendable, Equatable {
     ]
     public static let defaultDocumentPatterns: [String] = [
         ".env", ".env.*", "*.pem", "*.key", "*.p12", "*.keystore", "id_rsa*", "id_ed25519*",
-        "id_ecdsa*", "credentials", "credentials.*", "secrets.*", ".npmrc", ".netrc", ".pgpass",
+        "id_ecdsa*", "*credentials*", "*secrets*", ".npmrc", ".netrc", ".pgpass",
         "*/.aws/*", "*/.ssh/*", "*/.gnupg/*",
     ]
+    // As shipped, corrected in the Task 12 docs pass: this sketch originally read "credentials",
+    // "credentials.*", "secrets.*" (whole-component patterns), which missed real filenames like
+    // aws-credentials.json or prod-secrets-2024.yaml — a real gap in the slice's core purpose,
+    // fixed to the affix-matching *credentials*/*secrets* in Task 1's fix round 1 (Ruling R4)
+    // and shown correctly above. Matching is also case-insensitive (FNM_CASEFOLD) so .ENV /
+    // Secrets.yaml are caught too.
     public static let defaultWindowTitlePatterns: [String] = ["private browsing"]
     public static let defaultCredentialFieldPatterns: [String] = [
         "password", "passwd", "secret", "token", "api key", "api_key", "apikey", "private key",
@@ -1614,7 +1620,8 @@ Claude-Session: https://claude.ai/code/session_016CZ7A8EbQLY5eqaMWnXRq2"
 
 **Interfaces:**
 - Consumes: `SecretRedactor.redact` (Task 2), `EventStore.deleteEvents(olderThan:)` (Task 7), `CaptureSettings.retentionDays` (Task 1).
-- Produces: `openrhyme events --max-value-chars <n>` (default 2000, `0` = full); every returned `value`/`selected_text` passes through `SecretRedactor` when `privacy.enabled`; the daemon deletes events older than `retention_days` on start and every 24 h when `retention_days > 0`.
+- Produces: `openrhyme events --max-value-chars <n>` (`0` = full); every returned `value`/`selected_text` passes through `SecretRedactor` when `privacy.enabled`; the daemon deletes events older than `retention_days` on start and every 24 h when `retention_days > 0`.
+  **As shipped, corrected in the Task 12 docs pass:** `--max-value-chars` defaults to `0` (full text), not `2000` as this task originally specified (Ruling R32). The flag did not exist before this slice — `openrhyme events` always returned full values — so a `2000` default would have silently truncated the `openrhyme … --json` public output contract for every existing caller. The flag stays additive and opt-in; the MCP passes `--max-value-chars` explicitly and is unaffected. Read-time redaction also ended up broader than this line describes — see the corrected Step 3 below.
 
 - [ ] **Step 1: Write the failing tests** (append to the existing CLI events tests)
 
@@ -1649,7 +1656,8 @@ Expected: unknown option `--max-value-chars`; the secret is returned verbatim.
 
 - [ ] **Step 3: Implement**
 
-`EventsCommand`: add `@Option(name: .long, help: "Truncate value/selected_text to this many characters (0 = full).") var maxValueChars: Int = 2000`. After fetching rows, map them through:
+`EventsCommand`: add `@Option(name: .long, help: "Truncate value/selected_text to this many characters (0 = full).") var maxValueChars: Int = 0`.
+**As shipped, corrected in the Task 12 docs pass:** the default below is `2000` — that was this task's original text and it shipped, was reviewed, and was reverted to `0` in the same fix round for the reason given above (Ruling R32). The sketch is left as originally written for the historical record; the shipped default is `0`. As shipped, `project` also redacts `window_title`, `url`, `document`, `element_title` and `extra.previousTitle`, not only `value`/`selected_text` (privacy fix rounds 1 and 3, J8/R27/S3) — a credential in a URL query string or a window title is exactly as real a leak. After fetching rows, map them through:
 ```swift
     /// Spec privacy §4: redaction is re-applied on the way out, so a rule added today also
     /// protects rows captured before it existed. Idempotent — an already-redacted row is

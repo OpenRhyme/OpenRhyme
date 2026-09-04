@@ -357,9 +357,8 @@ import Testing
     }
 
     // MARK: - J12: when `--max-value-chars` actually cuts `value`/`selected_text`,
-    // `extra.valueTruncated` says so — the default (2000, matching the brief's own Step 3 and
-    // the MCP's pre-existing default, `docs/superpowers/plans/2026-09-03-privacy-controls.md`
-    // and `openrhyme-mcp/src/openrhyme_mcp/server.py`) is unchanged by this round.
+    // `extra.valueTruncated` says so. (Ruling R32: the default was changed 2000 → 0 in this same
+    // fix round — see Task 12 docs — so this comment no longer claims otherwise.)
 
     @Test func truncatedValueIsFlaggedInExtraButAFullValueIsNot() async throws {
         let dir = try CLIRunner.tempDataDir()
