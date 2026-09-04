@@ -20,7 +20,7 @@ import Testing
 
     private func capture(
         window: WindowInfo?, element: ElementInfo? = nil, policy: PrivacyPolicy? = nil
-    ) -> RawEvent {
+    ) throws -> RawEvent {
         let out = HeartbeatDiff.compute(
             previous: LastKnownState(),
             input: HeartbeatDiff.Input(
@@ -28,18 +28,20 @@ import Testing
                 context: FocusedContext(app: safari, window: window, element: element),
                 allowlist: allow, recordOtherApps: false, maxValueBytes: 1000, now: 100,
                 policy: policy ?? self.policy))
-        return out.events[1]
+        return try #require(
+            out.events.dropFirst(1).first,
+            "expected at least 2 events (heartbeat + context), got \(out.events.count)")
     }
 
     // MARK: - Identifying columns keep their ids
 
-    @Test func aGoogleDocsURLSurvivesCaptureWithItsDocumentIdIntact() {
+    @Test func aGoogleDocsURLSurvivesCaptureWithItsDocumentIdIntact() throws {
         // The id really does clear the backstop's gate — without this, the test below would pass
         // for the wrong reason.
         #expect(SecretRedactor.isHighEntropySecret(docID))
 
         let url = "https://docs.google.com/document/d/\(docID)/edit"
-        let row = capture(
+        let row = try capture(
             window: WindowInfo(
                 title: "Q3 Planning — Google Docs", document: "/Users/me/Docs/\(docID).gdoc",
                 url: url))
@@ -50,8 +52,8 @@ import Testing
         #expect(row.extra?["redacted"] == nil)
     }
 
-    @Test func anOpaqueIdInAnElementTitleAlsoSurvives() {
-        let row = capture(
+    @Test func anOpaqueIdInAnElementTitleAlsoSurvives() throws {
+        let row = try capture(
             window: WindowInfo(title: "Files"),
             element: ElementInfo(role: "AXRow", title: "report-\(docID).pdf"))
         #expect(row.elementTitle == "report-\(docID).pdf")
@@ -59,8 +61,8 @@ import Testing
 
     // MARK: - …but every structural rule still runs on those same columns
 
-    @Test func anAWSKeyInAURLIsStillRedactedAtCapture() {
-        let row = capture(
+    @Test func anAWSKeyInAURLIsStillRedactedAtCapture() throws {
+        let row = try capture(
             window: WindowInfo(
                 title: "console AKIAQQQQWWWWEEEERRRR",
                 document: "/tmp/AKIAQQQQWWWWEEEERRRR.txt",
@@ -71,8 +73,8 @@ import Testing
         #expect(row.extra?["redacted"] == .array([.string("aws-key")]))
     }
 
-    @Test func aTokenQueryParameterIsStillRedactedAndOnlyTheTokenIs() {
-        let row = capture(
+    @Test func aTokenQueryParameterIsStillRedactedAndOnlyTheTokenIs() throws {
+        let row = try capture(
             window: WindowInfo(
                 url: "https://api.example.com/v1/items?token=abcdefgh12345678&page=2&sort=name"))
         // The credential goes…
@@ -84,8 +86,8 @@ import Testing
                 + "&page=2&sort=name")
     }
 
-    @Test func aGitHubTokenInADocumentPathIsStillRedactedAtCapture() {
-        let row = capture(
+    @Test func aGitHubTokenInADocumentPathIsStillRedactedAtCapture() throws {
+        let row = try capture(
             window: WindowInfo(
                 document: "/tmp/ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.log"))
         #expect(row.document == "/tmp/[redacted:github-token].log")
@@ -93,8 +95,8 @@ import Testing
 
     // MARK: - Narrowing must not disable the backstop where it belongs
 
-    @Test func valueAndSelectedTextStillGetTheEntropyBackstop() {
-        let row = capture(
+    @Test func valueAndSelectedTextStillGetTheEntropyBackstop() throws {
+        let row = try capture(
             window: WindowInfo(title: "notes"),
             element: ElementInfo(
                 role: "AXTextArea", value: "session \(docID)", selectedText: "sel \(docID)"))
@@ -105,18 +107,18 @@ import Testing
 
     /// The same string, in two columns, in one row: redacted in the free-text one and intact in
     /// the identifying one. This is the whole rule in a single assertion pair.
-    @Test func theSameOpaqueIdIsRedactedInValueAndKeptInTheURL() {
-        let row = capture(
+    @Test func theSameOpaqueIdIsRedactedInValueAndKeptInTheURL() throws {
+        let row = try capture(
             window: WindowInfo(url: "https://docs.google.com/document/d/\(docID)/edit"),
             element: ElementInfo(role: "AXTextArea", value: "paste \(docID)"))
         #expect(row.value == "paste [redacted:high-entropy]")
         #expect(row.url == "https://docs.google.com/document/d/\(docID)/edit")
     }
 
-    @Test func theBackstopStillHonoursEntropyRedactionBeingTurnedOff() {
+    @Test func theBackstopStillHonoursEntropyRedactionBeingTurnedOff() throws {
         var settings = PrivacySettings()
         settings.entropyRedaction = false
-        let row = capture(
+        let row = try capture(
             window: WindowInfo(title: "notes"),
             element: ElementInfo(role: "AXTextArea", value: "session \(docID)"),
             policy: PrivacyPolicy(settings: settings))

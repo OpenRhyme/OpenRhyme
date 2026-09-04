@@ -49,8 +49,10 @@ import Testing
 
         let events = await drain(capturer)
         #expect(events.map(\.kind) == [.permissionChanged, .appActivated, .contextSnapshot])
-        #expect(events[0].extra?["trusted"] == true)
-        #expect(events[0].extra?["state"] == "active")
+        let permissionChanged = try #require(
+            events.first, "expected at least 1 event, got \(events.count)")
+        #expect(permissionChanged.extra?["trusted"] == true)
+        #expect(permissionChanged.extra?["state"] == "active")
     }
 
     @Test func steadyStateEmitsNothing() async throws {
@@ -184,8 +186,12 @@ import Testing
         let events = await drain(capturer)
         let idle = events.filter { $0.kind == .idleStarted || $0.kind == .idleEnded }
         #expect(idle.map(\.kind) == [.idleStarted, .idleEnded])
-        #expect(idle[0].extra?["idleSeconds"] == 130)
-        #expect(idle[1].extra?["idleSeconds"] == 190)  // 130 + 60 since idle began
+        let idleStarted = try #require(
+            idle.first, "expected at least 1 idle event, got \(idle.count)")
+        let idleEnded = try #require(
+            idle.dropFirst(1).first, "expected at least 2 idle events, got \(idle.count)")
+        #expect(idleStarted.extra?["idleSeconds"] == 130)
+        #expect(idleEnded.extra?["idleSeconds"] == 190)  // 130 + 60 since idle began
     }
 
     @Test func configReloadPicksUpNewAllowlist() async throws {

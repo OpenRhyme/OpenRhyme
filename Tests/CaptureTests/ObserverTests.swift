@@ -42,9 +42,15 @@ import Testing
 
     /// Yields the main actor while polling `condition` until it holds or `timeout` elapses —
     /// deterministic under CI load, instant when idle. Returns whether it held.
+    ///
+    /// The default is generous (10 s, not 2 s) because this costs nothing when the condition is
+    /// already true — the loop exits on the first check — and only extends the wait when a
+    /// loaded CI runner is genuinely slow to schedule the awaited work. A timeout here must
+    /// *fail* the test via the caller's `#expect`, never crash the process; see the fixed-index
+    /// subscripts below for the other half of that guarantee.
     @discardableResult
     func waitUntil(
-        timeout: Duration = .seconds(2), _ condition: () -> Bool
+        timeout: Duration = .seconds(10), _ condition: () -> Bool
     ) async -> Bool {
         let deadline = ContinuousClock.now + timeout
         while !condition() {
@@ -106,8 +112,10 @@ import Testing
             events.map(\.kind) == [
                 .permissionChanged, .appActivated, .contextSnapshot, .elementFocused,
             ])
-        #expect(events[3].extra?["reason"] == "observer")
-        #expect(events[3].value == "b")
+        let elementFocused = try #require(
+            events.dropFirst(3).first, "expected at least 4 events, got \(events.count)")
+        #expect(elementFocused.extra?["reason"] == "observer")
+        #expect(elementFocused.value == "b")
         #expect(fake.focusedContextCalls == 2)
     }
 
@@ -128,8 +136,12 @@ import Testing
                     .permissionChanged, .appActivated, .contextSnapshot, .windowTitleChanged,
                     .windowFocused,
                 ])
-        #expect(events[3].extra?["previousTitle"] == "One")
-        #expect(events[4].windowTitle == "Three")
+        let windowTitleChanged = try #require(
+            events.dropFirst(3).first, "expected at least 4 events, got \(events.count)")
+        let windowFocused = try #require(
+            events.dropFirst(4).first, "expected at least 5 events, got \(events.count)")
+        #expect(windowTitleChanged.extra?["previousTitle"] == "One")
+        #expect(windowFocused.windowTitle == "Three")
     }
 
     @Test func observerThenHeartbeatDoesNotDuplicate() async throws {
@@ -289,9 +301,11 @@ import Testing
         let events = await drain(capturer)
         let enabled = events.filter { $0.kind == .appAXEnabled }
         #expect(enabled.count == 2)
-        #expect(enabled[0].extra?["method"] == "AXManualAccessibility")
-        #expect(enabled[0].extra?["result"] == "ok")
-        #expect(enabled[0].bundleID == "com.microsoft.VSCode")
+        let firstEnabled = try #require(
+            enabled.first, "expected at least 1 appAXEnabled event, got \(enabled.count)")
+        #expect(firstEnabled.extra?["method"] == "AXManualAccessibility")
+        #expect(firstEnabled.extra?["result"] == "ok")
+        #expect(firstEnabled.bundleID == "com.microsoft.VSCode")
     }
 
     @Test func reconcileObservesRunningAllowlistedAppsAndDropsGoneOnes() async throws {

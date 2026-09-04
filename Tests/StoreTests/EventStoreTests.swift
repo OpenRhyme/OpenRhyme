@@ -25,9 +25,12 @@ import Testing
 
         let rows = try await store.query(EventQuery(since: 0))
         #expect(rows.map(\.id) == [1, 2])
-        #expect(rows[0].kind == .appActivated)
-        #expect(rows[0].extra == ["n": 1])
-        #expect(rows[1].bundleID == "com.b")
+        let firstRow = try #require(rows.first, "expected at least 1 row, got \(rows.count)")
+        let secondRow = try #require(
+            rows.dropFirst(1).first, "expected at least 2 rows, got \(rows.count)")
+        #expect(firstRow.kind == .appActivated)
+        #expect(firstRow.extra == ["n": 1])
+        #expect(secondRow.bundleID == "com.b")
     }
 
     @Test func filtersBySinceUntilKindsAppAndLimit() async throws {
