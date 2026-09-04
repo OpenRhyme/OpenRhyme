@@ -225,6 +225,14 @@ struct PurgeCommand: AsyncParsableCommand {
     /// SQLite's free pages (and, until checkpointed, the WAL) still hold their plaintext content,
     /// recoverable with a hex editor — so it is reported as a failed purge (non-zero, `ok:
     /// false`), even though real, correct deletion happened.
+    ///
+    /// A purge that deleted nothing is a different case entirely, not a smaller version of that
+    /// one: there is nothing to reclaim, so `vacuum`/`checkpoint` are skipped outright — running
+    /// them anyway would be pointless work that (measured) pushes the store's *retained*,
+    /// never-deleted plaintext through the WAL for no benefit, and a checkpoint that then
+    /// happened to be busy would report a scary `ok: false` for a purge that did nothing wrong.
+    /// This always returns (never throws) for a zero-deletion outcome; `vacuumed` comes back
+    /// `false` purely to honestly say no vacuum ran, not to signal a problem.
     static func destroy(
         selected: [RawEvent], deleteAttempts: Int = 3, vacuumAttempts: Int = 3,
         sleep: (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
@@ -240,6 +248,18 @@ struct PurgeCommand: AsyncParsableCommand {
                 delete: delete)
         } catch let failure as PartialDeleteFailure {
             guard isLockedError(failure.underlying) else { throw failure.underlying }
+            guard failure.deleted > 0 else {
+                // Nothing was deleted before the lock hit: still a failure (the user asked for a
+                // deletion that never happened), but there is nothing to reclaim, so don't
+                // attempt a pointless vacuum/checkpoint on the way to reporting it.
+                throw CLIError(
+                    code: "database_locked",
+                    message: lockedMessage(
+                        failure: failure, matched: matched, reclaimed: true, detail: ""),
+                    hint: "Wait for other openrhyme activity to finish, then re-run purge",
+                    exitCode: 1,
+                    data: purgeData(matched: matched, deleted: 0, vacuumed: false))
+            }
             // F2: a partial delete still leaves real, deleted-but-unreclaimed content behind —
             // attempt to reclaim it too, and say plainly whether that succeeded.
             let (reclaimed, detail) = await attemptVacuumAndCheckpoint(
@@ -251,6 +271,13 @@ struct PurgeCommand: AsyncParsableCommand {
                 hint: "Wait for other openrhyme activity to finish, then re-run purge",
                 exitCode: 1,
                 data: purgeData(matched: matched, deleted: failure.deleted, vacuumed: reclaimed))
+        }
+
+        // N1/N2: nothing was deleted, so there is nothing to reclaim from disk. Skip
+        // vacuum/checkpoint entirely rather than doing pointless (and, per N2, needlessly
+        // exposing) work, and report this as the success it is.
+        guard deleted > 0 else {
+            return Result(matched: matched, deleted: 0, vacuumed: false, dryRun: false)
         }
 
         let (reclaimed, detail) = await attemptVacuumAndCheckpoint(
@@ -372,9 +399,16 @@ struct PurgeCommand: AsyncParsableCommand {
         if result.dryRun {
             return "\(result.matched) row(s) would be deleted (dry run; nothing changed)"
         }
-        // `destroy` throws rather than returning when reclaiming didn't fully complete, so a
-        // `Result` reaching here always has `vacuumed == true` — this stays defensive rather
-        // than assuming that invariant.
+        // N1: a purge that deleted nothing has `vacuumed == false` too (`destroy` skips vacuum
+        // entirely rather than running it pointlessly), but that is a quiet no-op, not a
+        // problem — reported plainly, never with the loud WARNING below, which is reserved for
+        // "real rows were deleted but not yet reclaimed from disk."
+        guard result.deleted > 0 else {
+            return "0 of \(result.matched) matching row(s) deleted; nothing to reclaim"
+        }
+        // `destroy` throws rather than returning when a real deletion's reclaim didn't fully
+        // complete, so a `Result` reaching here with `deleted > 0` always has `vacuumed == true`
+        // — this stays defensive rather than assuming that invariant.
         guard result.vacuumed else {
             return
                 "deleted \(result.deleted) of \(result.matched) matching row(s) — WARNING: "

@@ -218,6 +218,12 @@ public actor EventStore {
     public func checkpointTruncate() throws -> Bool {
         let statement = try db.prepare("PRAGMA wal_checkpoint(TRUNCATE)")
         guard try statement.step() else { return true }  // no row: nothing pending
-        return statement.int64(0) != 1
+        // `busy` is documented as always 0 or 1 for this pragma, so this should never actually
+        // be NULL — but comparing an `Int64?` with `!=` would silently read a genuinely
+        // unexpected NULL as "not busy" (`nil != 1` is `true`). Treat that case explicitly, and
+        // conservatively, as busy instead: never claim a checkpoint succeeded from a reading we
+        // don't understand.
+        guard let busy = statement.int64(0) else { return false }
+        return busy == 0
     }
 }

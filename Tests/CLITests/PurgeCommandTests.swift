@@ -289,11 +289,12 @@ import Testing
 
     @Test func destroyThrowsALockedCLIErrorWhenDeleteNeverRecovers() async throws {
         let events = (1...3).map { RawEvent(id: Int64($0), ts: 0, kind: .contextSnapshot) }
+        var vacuumCalls = 0
         do {
             _ = try await PurgeCommand.destroy(
                 selected: events, deleteAttempts: 2, sleep: noSleep,
                 delete: { _ in throw self.locked() },
-                vacuum: {},
+                vacuum: { vacuumCalls += 1 },
                 checkpoint: { true })
             Issue.record("expected destroy to throw")
         } catch let error as CLIError {
@@ -304,7 +305,61 @@ import Testing
             let data = try #require(error.data?.objectValue)
             #expect(data["matched"]?.doubleValue == 3)
             #expect(data["deleted"]?.doubleValue == 0)
+            #expect(data["vacuumed"]?.boolValue == false)
         }
+        // N1/N2: nothing was deleted before the lock hit, so there is nothing to reclaim —
+        // vacuum must never even be attempted.
+        #expect(vacuumCalls == 0)
+    }
+
+    /// N1/N2: a purge that deletes nothing has nothing to reclaim. Running VACUUM/checkpoint
+    /// anyway would be pointless work — measured, it pushes the store's *retained* plaintext
+    /// through the WAL for no benefit — and, if a checkpoint then happened to be busy (the
+    /// daemon holds a connection open essentially always), would report a scary `ok: false` for
+    /// a purge that did nothing wrong. This must return success, not throw, and must never call
+    /// `vacuum`/`checkpoint` at all.
+    @Test func destroySkipsReclaimEntirelyAndReturnsSuccessWhenNothingWasDeleted() async throws {
+        var vacuumCalls = 0
+        var checkpointCalls = 0
+        let result = try await PurgeCommand.destroy(
+            selected: [], sleep: noSleep,
+            delete: { $0.count },
+            vacuum: { vacuumCalls += 1 },
+            checkpoint: {
+                checkpointCalls += 1
+                return true
+            })
+        #expect(result.matched == 0)
+        #expect(result.deleted == 0)
+        #expect(!result.vacuumed)
+        #expect(!result.dryRun)
+        #expect(vacuumCalls == 0, "a no-op purge must not run VACUUM at all")
+        #expect(checkpointCalls == 0, "a no-op purge must not run a checkpoint at all")
+    }
+
+    /// Same skip, but for rows that matched the filter and yet ended up not actually deleted
+    /// (e.g. already gone by the time the DELETE ran) — `deleted == 0` is what matters, not
+    /// `matched == 0`.
+    @Test func destroySkipsReclaimWhenRowsMatchedButNoneWereActuallyDeleted() async throws {
+        let event = RawEvent(id: 1, ts: 0, kind: .contextSnapshot)
+        var vacuumCalls = 0
+        let result = try await PurgeCommand.destroy(
+            selected: [event], sleep: noSleep,
+            delete: { _ in 0 },
+            vacuum: { vacuumCalls += 1 },
+            checkpoint: { true })
+        #expect(result.matched == 1)
+        #expect(result.deleted == 0)
+        #expect(!result.vacuumed)
+        #expect(vacuumCalls == 0)
+    }
+
+    @Test func humanLinesForANoOpPurgeIsPlainNotAlarming() {
+        let result = PurgeCommand.Result(matched: 0, deleted: 0, vacuumed: false, dryRun: false)
+        let text = PurgeCommand.humanLines(result)
+        #expect(!text.contains("WARNING"))
+        #expect(!text.lowercased().contains("vacuum"))
+        #expect(text.contains("0"))
     }
 
     /// F2: the partial-delete path must also attempt to reclaim whatever it did delete, and say
@@ -464,6 +519,40 @@ import Testing
             url: dir.appendingPathComponent("events.sqlite"), readOnly: true)
         #expect(try await store.count() == 0)
         await store.close()
+    }
+
+    /// N1/N2: a purge matching zero rows must report success (not a scary `ok: false`) and must
+    /// not touch the database at all. Measured before this fix: running VACUUM unconditionally
+    /// pushed 78,312 bytes of *retained* (never-deleted) plaintext through the WAL for a no-op
+    /// purge, and a busy checkpoint afterward could then report a false failure. Both
+    /// `events.sqlite` and its `-wal` sidecar are compared byte-for-byte — not just the reported
+    /// count — since N2 is precisely a case where the main file could look untouched while the
+    /// WAL grew.
+    @Test func noOpPurgeReportsSuccessAndLeavesTheDatabaseByteIdenticalIncludingTheWAL()
+        async throws
+    {
+        let (dir, env) = try await seeded()
+        let dbURL = dir.appendingPathComponent("events.sqlite")
+        let walURL = dir.appendingPathComponent("events.sqlite-wal")
+
+        func snapshot() -> (main: Data?, wal: Data?) {
+            (try? Data(contentsOf: dbURL), try? Data(contentsOf: walURL))
+        }
+
+        let before = snapshot()
+        let result = try CLIRunner.run(
+            ["purge", "--app", "com.nonexistent.example", "--yes", "--json"], env: env)
+        #expect(result.status == 0, "\(result.stderr)")
+        let envelope = try CLIRunner.json(result.stdout)
+        #expect(envelope["ok"] as? Bool == true)
+        let data = envelope["data"] as? [String: Any]
+        #expect(data?["matched"] as? Int == 0)
+        #expect(data?["deleted"] as? Int == 0)
+        #expect(data?["vacuumed"] as? Bool == false)
+
+        let after = snapshot()
+        #expect(before.main == after.main, "a no-op purge must not touch events.sqlite")
+        #expect(before.wal == after.wal, "a no-op purge must not touch events.sqlite-wal")
     }
 
     /// Requirement: `--dry-run` must be genuinely read-only. Checkpointed bytes of the main
