@@ -111,6 +111,24 @@ import Testing
         }
     }
 
+    /// Fix round 1: the unquoted tail used to run to the end of the string, so on a real URL it
+    /// swallowed every parameter after the credential. That only affected a read before
+    /// capture-time redaction covered URLs; now the over-match would be written to disk for good.
+    @Test func assignmentSecretStopsAtAURLParameterOrFragmentBoundary() {
+        let query = redact(
+            "https://api.example.com/v1/items?token=abcdefgh12345678&page=2&sort=name&u=alice",
+            entropy: false)
+        #expect(query.rules == ["assignment-secret"])
+        #expect(!query.text.contains("abcdefgh12345678"))
+        #expect(
+            query.text == "https://api.example.com/v1/items?[redacted:assignment-secret]"
+                + "&page=2&sort=name&u=alice")
+
+        let fragment = redact(
+            "https://ex.com/?api_key=abcdefgh12345678#section-3", entropy: false)
+        #expect(fragment.text == "https://ex.com/?[redacted:assignment-secret]#section-3")
+    }
+
     @Test func quotedAssignmentValuesAreRedacted() {
         for text in [
             #"password="hunter2hunter2""#, "password='hunter2hunter2'",

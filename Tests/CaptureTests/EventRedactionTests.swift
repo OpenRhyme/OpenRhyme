@@ -50,12 +50,15 @@ import Testing
         var event = RawEvent(ts: 1, kind: .contextSnapshot, windowTitle: "title \(key)")
         #expect(EventRedaction.apply(to: &event, policy: .disabled).isEmpty)
         #expect(event.windowTitle == "title \(key)")
-        #expect(EventRedaction.redactText("title \(key)", policy: .disabled) == "title \(key)")
+        #expect(
+            EventRedaction.redact("title \(key)", coverage: .structuralOnly, policy: .disabled)
+                == "title \(key)")
     }
 
-    @Test func redactTextCoversTheSinglePieceCaseInspectUses() {
+    @Test func redactCoversTheSinglePieceCaseInspectUses() {
         #expect(
-            EventRedaction.redactText("open \(key)", policy: policy) == "open [redacted:aws-key]")
-        #expect(EventRedaction.redactText(nil, policy: policy) == nil)
+            EventRedaction.redact("open \(key)", coverage: .structuralOnly, policy: policy)
+                == "open [redacted:aws-key]")
+        #expect(EventRedaction.redact(nil, coverage: .structuralOnly, policy: policy) == nil)
     }
 }

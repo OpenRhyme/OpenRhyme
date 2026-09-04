@@ -115,14 +115,18 @@ struct InspectCommand: AsyncParsableCommand {
         element: ElementInfo?, window: WindowInfo?, policy: PrivacyPolicy, maxValueBytes: Int
     ) -> (element: ElementInfo?, window: WindowInfo?) {
         var visibleWindow = window
-        visibleWindow?.title = EventRedaction.redactText(window?.title, policy: policy)
-        visibleWindow?.document = EventRedaction.redactText(window?.document, policy: policy)
-        visibleWindow?.url = EventRedaction.redactText(window?.url, policy: policy)
+        visibleWindow?.title = EventRedaction.redact(
+            window?.title, coverage: .structuralOnly, policy: policy)
+        visibleWindow?.document = EventRedaction.redact(
+            window?.document, coverage: .structuralOnly, policy: policy)
+        visibleWindow?.url = EventRedaction.redact(
+            window?.url, coverage: .structuralOnly, policy: policy)
         guard var visibleElement = element else { return (nil, visibleWindow) }
         let redacted = Redaction.apply(element, maxValueBytes: maxValueBytes, policy: policy)
         visibleElement.value = redacted.value
         visibleElement.selectedText = redacted.selectedText
-        visibleElement.title = EventRedaction.redactText(visibleElement.title, policy: policy)
+        visibleElement.title = EventRedaction.redact(
+            visibleElement.title, coverage: .structuralOnly, policy: policy)
         return (visibleElement, visibleWindow)
     }
 

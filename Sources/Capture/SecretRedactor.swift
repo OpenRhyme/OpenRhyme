@@ -63,11 +63,19 @@ public enum SecretRedactor {
         Rule(
             name: "connection-string",
             regex: try! Regex(#"[a-z][a-z0-9+.\-]*://[^\s:@/]+:[^\s:@/]{6,}@"#)),
+        /// Fix round 1: the unquoted tail excludes `&` and `#` as well as whitespace, quotes and
+        /// brackets, so it stops at a URL parameter or fragment boundary. It used to run to the
+        /// end of the query string — `?token=abcdefgh12345678&page=2&sort=name` redacted the
+        /// page and sort parameters along with the token — which only cost a read before this
+        /// slice but now writes the over-match to disk permanently. A real secret carried in a
+        /// URL cannot contain a literal `&` (it would be percent-encoded), and one carried in a
+        /// shell or config line containing `&` has to be quoted, which the two quoted
+        /// alternatives above still match in full.
         Rule(
             name: "assignment-secret",
             regex: try! Regex(
                 #"(?i)(?:api[_\-]?key|secret|token|password|passwd)(?![A-Za-z0-9_])"#
-                    + #"['"]?\s*[:=]\s*(?:"[^"]{8,}"|'[^']{8,}'|[^\s'"\[\]]{8,})"#)),
+                    + #"['"]?\s*[:=]\s*(?:"[^"]{8,}"|'[^']{8,}'|[^\s'"\[\]&#]{8,})"#)),
     ]
 
     /// A run long enough and mixed enough to be a credential rather than prose or a path.

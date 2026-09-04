@@ -69,7 +69,7 @@ extension AXClient {
         let redacted = Redaction.apply(info, maxValueBytes: Self.nodeRedactionBytes, policy: policy)
         return ElementNode(
             role: info.role, subrole: info.subrole,
-            title: EventRedaction.redactText(info.title, policy: policy),
+            title: EventRedaction.redact(info.title, coverage: .structuralOnly, policy: policy),
             identifier: info.identifier,
             value: redacted.value.map { String($0.prefix(200)) }, children: children)
     }
