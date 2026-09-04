@@ -378,7 +378,8 @@ public final class Capturer {
             do {
                 context = try ax.focusedContext(
                     of: frontmost,
-                    reusing: freshRead ? nil : lastContentCache[frontmost.pid])
+                    reusing: freshRead ? nil : lastContentCache[frontmost.pid],
+                    policy: PrivacyPolicy(settings: config.privacy))
                 readFailures[frontmost.pid] = nil
                 staleBackoff = 5
                 if let context { lastContentCache[frontmost.pid] = ax.cache(from: context) }

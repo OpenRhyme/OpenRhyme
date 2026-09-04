@@ -13,13 +13,33 @@ public struct ElementNode: Sendable, Encodable {
 public struct ElementInspection: Sendable, Encodable {
     public var attributeNames: [String]
     public var tree: ElementNode?
+    public var protectedBy: String?
+
+    public init(attributeNames: [String], tree: ElementNode?, protectedBy: String? = nil) {
+        self.attributeNames = attributeNames
+        self.tree = tree
+        self.protectedBy = protectedBy
+    }
 }
 
 extension AXClient {
     /// Developer tool behind `openrhyme inspect`: attribute names of the focused element and
     /// a bounded subtree (`depth` ≤ 3, at most 200 nodes). The daemon never walks trees.
-    public func focusedElementInspection(of app: AppInfo, depth: Int) throws -> ElementInspection {
+    public func focusedElementInspection(
+        of app: AppInfo, depth: Int, policy: PrivacyPolicy
+    ) throws -> ElementInspection {
         let application = AXUIElementCreateApplication(app.pid)
+        var window: WindowInfo?
+        if let focusedWindow = try element(application, kAXFocusedWindowAttribute) {
+            window = try readWindow(focusedWindow)
+        }
+        if case .protected(let rule) = policy.evaluateContext(
+            bundleID: app.bundleID, windowTitle: window?.title, document: window?.document,
+            url: window?.url)
+        {
+            // Privacy §5.4: `inspect` is not a bypass. `--ignore-privacy` passes `.disabled`.
+            return ElementInspection(attributeNames: [], tree: nil, protectedBy: rule)
+        }
         guard let focused = try element(application, kAXFocusedUIElementAttribute) else {
             return ElementInspection(attributeNames: [], tree: nil)
         }

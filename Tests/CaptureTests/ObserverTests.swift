@@ -637,4 +637,22 @@ import Testing
         capturer.tick()
         #expect(fake.observedKinds[10] == [.focusedWindowChanged])
     }
+
+    @Test func aProtectedContextIsNeverReadForContent() async throws {
+        let fake = FakeAXClient()
+        fake.show(
+            safari, window: WindowInfo(title: "Vault", url: "https://x.example/ui/vault/secrets"),
+            element: ElementInfo(role: "AXWebArea", value: "secret list"))
+        let capturer = try makeCapturer(fake: fake)
+        capturer.tick()
+        // The policy reached the AX layer, and the fake reports the context it returned.
+        #expect(fake.lastPolicy?.enabled == true)
+        let events = await drain(capturer)
+        let snapshot = events.last { $0.kind == .contextSnapshot }
+        #expect(snapshot?.extra?["protected"] == true)
+        #expect(snapshot?.extra?["protectedBy"] == "url")
+        #expect(snapshot?.value == nil)
+        #expect(snapshot?.windowTitle == nil)
+        #expect(snapshot?.url == nil)
+    }
 }

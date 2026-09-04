@@ -45,12 +45,20 @@ public final class AXClient: AXReading {
     public private(set) var contentReadCount = 0
 
     public func focusedContext(
-        of app: AppInfo, reusing cache: ContentCache?
+        of app: AppInfo, reusing cache: ContentCache?, policy: PrivacyPolicy
     ) throws -> FocusedContext {
         let application = AXUIElementCreateApplication(app.pid)
         var window: WindowInfo?
         if let focusedWindow = try element(application, kAXFocusedWindowAttribute) {
             window = try readWindow(focusedWindow)
+        }
+        if case .protected(let rule) = policy.evaluateContext(
+            bundleID: app.bundleID, windowTitle: window?.title, document: window?.document,
+            url: window?.url)
+        {
+            // Privacy §4: return before any content read — the text never enters the process.
+            return FocusedContext(
+                app: app, window: nil, element: nil, protection: .protected(rule: rule))
         }
         var element: ElementInfo?
         if let focused = try self.element(application, kAXFocusedUIElementAttribute) {

@@ -6,6 +6,7 @@ import Foundation
 /// flicker and counter changes never register as a change.
 public struct ContextSignature: Sendable, Equatable {
     public var pid: Int32
+    public var protectedBy: String?
     public var windowTitle: String?
     public var document: String?
     public var url: String?
@@ -105,11 +106,13 @@ public enum HeartbeatDiff {
         public var trigger: Trigger
         public var input: InputClass?
         public var contentMemorySeconds: Double
+        public var policy: PrivacyPolicy
 
         public init(
             frontmost: AppInfo?, context: FocusedContext?, allowlist: Set<String>,
             recordOtherApps: Bool, maxValueBytes: Int, now: Double, trigger: Trigger = .heartbeat,
-            input: InputClass? = nil, contentMemorySeconds: Double = 1800
+            input: InputClass? = nil, contentMemorySeconds: Double = 1800,
+            policy: PrivacyPolicy = .disabled
         ) {
             self.frontmost = frontmost
             self.context = context
@@ -120,6 +123,7 @@ public enum HeartbeatDiff {
             self.trigger = trigger
             self.input = input
             self.contentMemorySeconds = contentMemorySeconds
+            self.policy = policy
         }
     }
 
@@ -160,11 +164,33 @@ public enum HeartbeatDiff {
             return Output(events: events, state: state)
         }
 
+        // Privacy §5.5: a protected context yields an app-level marker and nothing else. The
+        // signature is (pid, protectedBy), so consecutive protected reads dedup to one row.
+        if case .protected(let rule) = context.protection {
+            let signature = ContextSignature(pid: app.pid, protectedBy: rule)
+            if appChanged || signature != state.signature {
+                events.append(
+                    RawEvent(
+                        ts: input.now, kind: .contextSnapshot, pid: app.pid,
+                        bundleID: app.bundleID, appName: app.name,
+                        extra: [
+                            "reason": .string(input.trigger.reason),
+                            "protected": .bool(true),
+                            "protectedBy": .string(rule),
+                            "fingerprint": .string(
+                                Fingerprint.compute(
+                                    bundleID: app.bundleID, windowTitle: nil, document: nil,
+                                    url: nil)),
+                        ]))
+            }
+            state.signature = signature
+            state.lastWindowTitle = nil
+            return Output(events: events, state: state)
+        }
+
         let element = context.element
-        // Input.policy arrives in Task 5; .disabled keeps this task's behaviour identical to
-        // every existing test until the policy is threaded through.
         let redacted = Redaction.apply(
-            element, maxValueBytes: input.maxValueBytes, policy: .disabled)
+            element, maxValueBytes: input.maxValueBytes, policy: input.policy)
         let hash = redacted.value.map(Hashing.sha256Hex)
         var signature = ContextSignature(
             pid: app.pid, windowTitle: TitleNormalizer.normalize(context.window?.title),
@@ -204,6 +230,9 @@ public enum HeartbeatDiff {
             if valueUnchanged { extra["valueUnchanged"] = true }
             if let textSource = element?.textSource {
                 extra["textSource"] = .string(textSource)
+            }
+            if !redacted.redactedRules.isEmpty {
+                extra["redacted"] = .array(redacted.redactedRules.map(JSONValue.string))
             }
             if case .observer(.titleChanged) = input.trigger,
                 let previousTitle = previous.lastWindowTitle
