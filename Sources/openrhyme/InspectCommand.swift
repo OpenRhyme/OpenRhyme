@@ -65,12 +65,32 @@ struct InspectCommand: AsyncParsableCommand {
                 let context = try client.focusedContext(of: app, reusing: nil, policy: policy)
                 let inspection = try client.focusedElementInspection(
                     of: app, depth: depth, policy: policy)
+                let protectedBy = Self.protectedBy(
+                    context: context.protection, inspection: inspection.protectedBy)
+                guard protectedBy == nil else {
+                    return Inspection(
+                        app: app, window: nil, element: nil, attributeNames: [], tree: nil,
+                        protectedBy: protectedBy)
+                }
                 return Inspection(
                     app: app, window: context.window, element: context.element,
                     attributeNames: inspection.attributeNames, tree: inspection.tree,
-                    protectedBy: inspection.protectedBy)
+                    protectedBy: nil)
             }
         }
+    }
+
+    /// Privacy §5.4: `focusedContext` and `focusedElementInspection` evaluate the policy
+    /// independently (two separate AX round-trips), so `inspect` must consult both signals
+    /// and treat either one alone deciding "protected" as protected — never just one of them.
+    /// Trusting only `inspection.protectedBy` is exactly the gap that let a windowless context
+    /// leak its focused element even though `focusedContext` had already refused the same
+    /// context (privacy fix round 2). Pure and separately testable so this combining rule can be
+    /// pinned without live AX.
+    static func protectedBy(context: Protection, inspection: String?) -> String? {
+        if let inspection { return inspection }
+        if case .protected(let rule) = context { return rule }
+        return nil
     }
 
     static func human(_ inspection: Inspection) -> String {

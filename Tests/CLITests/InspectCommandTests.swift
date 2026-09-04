@@ -54,6 +54,39 @@ import Testing
         #expect(object?["tree"] == nil || object?["tree"] is NSNull)
         #expect((object?["attribute_names"] as? [String])?.isEmpty == true)
     }
+
+    // MARK: - G1 (privacy fix round 2): `focusedContext` and `focusedElementInspection`
+    // evaluate the policy independently — `inspect` must never trust only one of them.
+    // `InspectCommand.protectedBy` is the pure combinator that makes this pinnable without
+    // live AX; `InspectPrivacyLiveTests` below separately proves the two real AXClient calls
+    // agree on an actual windowless target.
+
+    @Test func windowlessGuardOnContextAloneIsStillTreatedAsProtected() {
+        // The exact shape of the bug: `focusedContext` correctly fails closed
+        // (`.protected("unverifiable-context")`) on a windowless context, but
+        // `focusedElementInspection` — before this fix — fell through and returned
+        // `protectedBy: nil`. A combinator that only reads `inspection` would miss this.
+        let result = InspectCommand.protectedBy(
+            context: .protected(rule: "unverifiable-context"), inspection: nil)
+        #expect(result == "unverifiable-context")
+    }
+
+    @Test func windowlessGuardOnInspectionAloneIsStillTreatedAsProtected() {
+        let result = InspectCommand.protectedBy(context: .open, inspection: "bundle-id")
+        #expect(result == "bundle-id")
+    }
+
+    @Test func openOnBothSidesIsOpen() {
+        #expect(InspectCommand.protectedBy(context: .open, inspection: nil) == nil)
+    }
+
+    @Test func inspectionRuleWinsWhenBothSidesAgreeOnBeingProtected() {
+        // Both sides protected is the common case; either rule name is acceptable to report,
+        // but the result must never be nil.
+        let result = InspectCommand.protectedBy(
+            context: .protected(rule: "bundle-id"), inspection: "bundle-id")
+        #expect(result == "bundle-id")
+    }
 }
 
 /// Live AX tests. Require a TCC grant on the terminal; never run in CI (see

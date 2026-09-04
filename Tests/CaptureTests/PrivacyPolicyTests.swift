@@ -109,4 +109,26 @@ import Testing
                 bundleID: "com.1password.1password", windowTitle: nil, document: nil,
                 url: "https://1password.com/vault") == .protected(rule: "bundle-id"))
     }
+
+    // MARK: - protectionForWindowlessContext (privacy fix round 2, G1)
+    //
+    // Shared by `AXClient.focusedContext` and `AXClient.focusedElementInspection` so the two can
+    // never diverge on this rule again — pinning it once here covers both call sites structurally.
+
+    @Test func windowlessContextIsProtectedWhenEnabledWithNonEmptyRules() {
+        #expect(policy.protectionForWindowlessContext() == .protected(rule: "unverifiable-context"))
+    }
+
+    @Test func windowlessContextFailsOpenWhenPolicyIsDisabled() {
+        #expect(PrivacyPolicy.disabled.protectionForWindowlessContext() == nil)
+    }
+
+    @Test func windowlessContextIsOpenWhenNoRulesCouldEverApply() {
+        var settings = PrivacySettings()
+        settings.protectedURLPatterns = []
+        settings.protectedDocumentPatterns = []
+        settings.protectedWindowTitlePatterns = []
+        // Bundle-id rules don't need a window to evaluate, so they don't factor into this guard.
+        #expect(PrivacyPolicy(settings: settings).protectionForWindowlessContext() == nil)
+    }
 }

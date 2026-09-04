@@ -40,6 +40,12 @@ extension AXClient {
             // Privacy §5.4: `inspect` is not a bypass. `--ignore-privacy` passes `.disabled`.
             return ElementInspection(attributeNames: [], tree: nil, protectedBy: rule)
         }
+        // Same windowless fail-closed rule as `focusedContext` (privacy fix round 2: this half
+        // was missing, so a windowless context leaked its focused element even though
+        // `focusedContext` correctly refused the same context).
+        if window == nil, case .protected(let rule)? = policy.protectionForWindowlessContext() {
+            return ElementInspection(attributeNames: [], tree: nil, protectedBy: rule)
+        }
         guard let focused = try element(application, kAXFocusedUIElementAttribute) else {
             return ElementInspection(attributeNames: [], tree: nil)
         }

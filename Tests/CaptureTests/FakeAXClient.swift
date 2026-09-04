@@ -56,14 +56,11 @@ final class FakeAXClient: AXReading {
             return FocusedContext(
                 app: app, window: nil, element: nil, protection: .protected(rule: rule))
         }
-        // Mirrors AXClient.focusedContext's windowless fail-closed rule (privacy fix round 1).
-        if policy.enabled, context.window == nil,
-            !policy.protectedURLPatterns.isEmpty || !policy.protectedDocumentPatterns.isEmpty
-                || !policy.protectedWindowTitlePatterns.isEmpty
-        {
-            return FocusedContext(
-                app: app, window: nil, element: nil,
-                protection: .protected(rule: "unverifiable-context"))
+        // Mirrors AXClient.focusedContext's windowless fail-closed rule via the same shared
+        // helper (privacy fix round 1; the helper itself landed in round 2 so this can never
+        // drift from the real implementation again).
+        if context.window == nil, let protection = policy.protectionForWindowlessContext() {
+            return FocusedContext(app: app, window: nil, element: nil, protection: protection)
         }
         return context
     }

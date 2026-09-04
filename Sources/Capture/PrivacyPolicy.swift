@@ -64,6 +64,21 @@ public struct PrivacyPolicy: Sendable, Equatable {
         return .open
     }
 
+    /// With no focused window, the URL/document/window-title rules cannot be evaluated at all —
+    /// a protected page reachable only through the focused element would otherwise be harvested.
+    /// `nil` means "no windowless guard applies" (open, or a disabled policy, which still fails
+    /// open). Shared by every AX entry point that can be called with a nil window
+    /// (`AXClient.focusedContext`, `AXClient.focusedElementInspection`) so they can never diverge
+    /// on this again — that divergence (fixed in privacy fix round 2) is exactly how one of them
+    /// kept reading content while the other correctly refused.
+    public func protectionForWindowlessContext() -> Protection? {
+        guard enabled,
+            !protectedURLPatterns.isEmpty || !protectedDocumentPatterns.isEmpty
+                || !protectedWindowTitlePatterns.isEmpty
+        else { return nil }
+        return .protected(rule: "unverifiable-context")
+    }
+
     /// A field whose name says credential, even when the app never marked it secure.
     public func isCredentialField(identifier: String?, title: String?) -> Bool {
         guard enabled else { return false }

@@ -19,6 +19,8 @@ struct PrivacyCommand: AsyncParsableCommand {
 
     struct Result: Encodable {
         let enabled: Bool
+        let dataDir: String
+        let dbPath: String
         let entropyRedaction: Bool
         let protectedBundleIDs: [String]
         let protectedURLPatterns: [String]
@@ -37,6 +39,8 @@ struct PrivacyCommand: AsyncParsableCommand {
         // and must not be mixed within one command's envelope.
         enum CodingKeys: String, CodingKey {
             case enabled
+            case dataDir = "data_dir"
+            case dbPath = "db_path"
             case entropyRedaction = "entropy_redaction"
             case protectedBundleIDs = "protected_bundle_ids"
             case protectedURLPatterns = "protected_url_patterns"
@@ -61,6 +65,8 @@ struct PrivacyCommand: AsyncParsableCommand {
 
             return Result(
                 enabled: policy.enabled,
+                dataDir: paths.dataDir.path,
+                dbPath: paths.databaseURL.path,
                 entropyRedaction: policy.entropyRedaction,
                 protectedBundleIDs: policy.protectedBundleIDs.sorted(),
                 protectedURLPatterns: policy.protectedURLPatterns,
@@ -130,7 +136,25 @@ struct PrivacyCommand: AsyncParsableCommand {
 
     static func human(_ result: Result) -> String {
         var lines: [String] = []
-        lines.append("privacy: \(result.enabled ? "enabled" : "disabled")")
+        // The single word "disabled" reads exactly like "enabled" at a skim — this is the one
+        // line most likely to answer "am I protected?", so it must be impossible to misread.
+        if result.enabled {
+            lines.append("privacy: ENABLED")
+        } else {
+            lines.append(
+                "privacy: DISABLED — none of the rules below are being enforced right now")
+        }
+        lines.append("data dir: \(result.dataDir)")
+        lines.append("db path:  \(result.dbPath)")
+        // Unconditional, not just when something already matches: the one thing a first-time
+        // reader must learn before trusting this report at all.
+        lines.append(
+            "note: protect rules only change what gets captured from now on — they never "
+                + "remove or alter anything already stored; use `openrhyme purge --apply-rules "
+                + "--yes` to remove existing matches.")
+        if !result.enabled {
+            lines.append("configured rules (listed for reference; inactive while disabled):")
+        }
         lines.append("entropy redaction: \(result.entropyRedaction ? "on" : "off")")
         lines.append(
             "protected bundle IDs (\(result.protectedBundleIDs.count)): "

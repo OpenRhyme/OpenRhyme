@@ -38,6 +38,12 @@ import Testing
                 == true)
         #expect((data["credential_field_patterns"] as? [String])?.contains("password") == true)
         #expect(data["stored_rows_matching_rules"] as? Int == 1)
+        // G4: a report that doesn't say which store it describes can't be acted on with
+        // confidence — must match `status`'s spelling exactly.
+        #expect(data["data_dir"] as? String == dir.path)
+        #expect(
+            data["db_path"] as? String
+                == dir.appendingPathComponent("events.sqlite").path)
     }
 
     @Test func humanOutputListsCountsAndTheRemovalHintWhenSomethingMatches() async throws {
@@ -51,7 +57,9 @@ import Testing
             ))
     }
 
-    @Test func noHintWhenNothingStoredMatchesTheRules() async throws {
+    @Test func noRemovalHintWhenNothingStoredMatchesTheRulesButTheFutureCaveatAlwaysAppears()
+        async throws
+    {
         let dir = try CLIRunner.tempDataDir()
         let store = try EventStore(url: dir.appendingPathComponent("events.sqlite"))
         try await store.append(
@@ -60,7 +68,36 @@ import Testing
         let result = try CLIRunner.run(["privacy"], env: ["OPENRHYME_DATA_DIR": dir.path])
         #expect(result.status == 0, "\(result.stderr)")
         #expect(result.stdout.contains("stored rows matching current rules: 0"))
-        #expect(!result.stdout.contains("openrhyme purge --apply-rules"))
+        // The per-match removal sentence is conditional...
+        #expect(
+            !result.stdout.contains(
+                "stored rows match the current rules; remove them with: openrhyme purge"))
+        // ...but G3's unconditional "rules are forward-looking only" note must always be there,
+        // match count aside — it's the one principle a first-time reader must learn regardless.
+        #expect(result.stdout.contains("only change what gets captured from now on"))
+        #expect(result.stdout.contains("openrhyme purge --apply-rules --yes"))
+    }
+
+    @Test func disabledStateIsUnmistakableNotJustTheWordDisabled() async throws {
+        let dir = try CLIRunner.tempDataDir()
+        var settings = PrivacySettings()
+        settings.enabled = false
+        try Config(privacy: settings).save(to: dir.appendingPathComponent("config.json"))
+        let env = ["OPENRHYME_DATA_DIR": dir.path]
+
+        let jsonResult = try CLIRunner.run(["privacy", "--json"], env: env)
+        #expect(jsonResult.status == 0, "\(jsonResult.stderr)")
+        let data = try #require(try CLIRunner.json(jsonResult.stdout)["data"] as? [String: Any])
+        #expect(data["enabled"] as? Bool == false)
+
+        let humanResult = try CLIRunner.run(["privacy"], env: env)
+        #expect(humanResult.status == 0, "\(humanResult.stderr)")
+        // G2: not just a lowercase "disabled" sitting next to otherwise-normal-looking output —
+        // must be visually unmistakable and say plainly that the rules below do nothing.
+        #expect(humanResult.stdout.contains("DISABLED"))
+        #expect(humanResult.stdout.contains("none of the rules below are being enforced"))
+        #expect(!humanResult.stdout.contains("privacy: enabled"))
+        #expect(!humanResult.stdout.contains("privacy: ENABLED"))
     }
 
     @Test func reportsCleanlyWithNoDatabaseAndNeverCreatesOne() throws {
