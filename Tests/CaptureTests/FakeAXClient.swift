@@ -57,7 +57,7 @@ final class FakeAXClient: AXReading {
                 app: app, window: nil, element: nil, protection: .protected(rule: rule))
         }
         // Mirrors AXClient.focusedContext's windowless fail-closed rule (privacy fix round 1).
-        if context.window == nil,
+        if policy.enabled, context.window == nil,
             !policy.protectedURLPatterns.isEmpty || !policy.protectedDocumentPatterns.isEmpty
                 || !policy.protectedWindowTitlePatterns.isEmpty
         {

@@ -671,4 +671,18 @@ import Testing
         #expect(snapshot?.extra?["protectedBy"] == "unverifiable-context")
         #expect(snapshot?.value == nil)
     }
+
+    @Test func aWindowlessContextIsOpenWhenPrivacyIsDisabled() async throws {
+        let fake = FakeAXClient()
+        fake.frontmost = safari
+        fake.contexts[10] = FocusedContext(
+            app: safari, window: nil,
+            element: ElementInfo(role: "AXWebArea", value: "ordinary page body"))
+        let capturer = try makeCapturer(fake: fake) { $0.privacy.enabled = false }
+        capturer.tick()
+        let events = await drain(capturer)
+        let snapshot = events.last { $0.kind == .contextSnapshot }
+        #expect(snapshot?.extra?["protected"] == nil)
+        #expect(snapshot?.value == "ordinary page body")
+    }
 }
