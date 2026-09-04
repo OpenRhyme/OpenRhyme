@@ -3,7 +3,7 @@ import Testing
 
 @Suite struct VersionCommandTests {
     @Test func versionJSONEnvelope() throws {
-        let result = try CLIRunner.run(["version", "--json"])
+        let result = try CLIRunner.run(["version", "--json"], env: try CLIRunner.tempEnv())
         #expect(result.status == 0, "\(result.stderr)")
         let envelope = try CLIRunner.json(result.stdout)
         #expect(envelope["ok"] as? Bool == true)
@@ -14,18 +14,18 @@ import Testing
     }
 
     @Test func versionHumanOutput() throws {
-        let result = try CLIRunner.run(["version"])
+        let result = try CLIRunner.run(["version"], env: try CLIRunner.tempEnv())
         #expect(result.status == 0)
         #expect(result.stdout == "openrhyme 0.1.0 (schema 1)\n")
     }
 
     @Test func unknownCommandExitsWithUsageCode() throws {
-        let result = try CLIRunner.run(["bogus"])
+        let result = try CLIRunner.run(["bogus"], env: try CLIRunner.tempEnv())
         #expect(result.status == 2)
     }
 
     @Test func helpExitsZeroWithUsageText() throws {
-        let result = try CLIRunner.run(["--help"])
+        let result = try CLIRunner.run(["--help"], env: try CLIRunner.tempEnv())
         #expect(result.status == 0)
         #expect(result.stdout.contains("USAGE") || result.stdout.contains("OVERVIEW"))
     }

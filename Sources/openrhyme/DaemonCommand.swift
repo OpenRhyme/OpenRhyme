@@ -90,17 +90,25 @@ struct DaemonCommand: AsyncParsableCommand {
                 "capture.retention_days in config.json is not a valid whole number (e.g. it's a "
                     + "quoted string) — retention is OFF until it's fixed to a bare integer")
         }
-        await Self.runStartupRetentionSweep(
-            retentionDays: retentionDays, now: Date().timeIntervalSince1970,
-            previousDaemonStarted: { try await Self.mostRecentDaemonStarted(store: store) },
-            countEligible: {
-                try await store.countEvents(olderThan: $0, excludingKinds: Self.auditTrailKinds)
-            },
-            sweepNow: { days in
-                await Self.sweepNow(
-                    retentionDays: days, store: store, onInfo: onInfo, onError: onError)
-            },
-            onInfo: onInfo)
+        // Privacy fix round 2, S2: one gate, created before the first sweep and shared with the
+        // periodic loop below, so the startup path and the periodic path apply exactly the same
+        // first-enable predicate and a skip announced at startup actually holds for the run.
+        let gate = RetentionReviewGate(
+            previousRetentionDays: Self.recordedRetentionDays(
+                try? await Self.mostRecentDaemonStarted(store: store)))
+        let retentionPreview: @Sendable (Double) async throws -> RetentionPreview = { cutoff in
+            RetentionPreview(
+                sweepable: try await store.countEvents(
+                    olderThan: cutoff, excludingKinds: Self.auditTrailKinds),
+                matchingPurge: try await store.countEvents(olderThan: cutoff))
+        }
+        let sweep: @Sendable (Int, Double) async -> RetentionSweepOutcome = { days, at in
+            await Self.sweepNow(
+                retentionDays: days, now: at, store: store, onInfo: onInfo, onError: onError)
+        }
+        await Self.retentionSweepAttempt(
+            retentionDays: retentionDays, now: Date().timeIntervalSince1970, gate: gate,
+            preview: retentionPreview, sweepNow: sweep, onInfo: onInfo, onError: onError)
 
         // Spec privacy §5.8: "daemon.started" records the posture in force, so an auditor
         // reading history later can tell whether redaction was even switched on over a given
@@ -165,13 +173,18 @@ struct DaemonCommand: AsyncParsableCommand {
         // so turning retention off (or on, or to a different window) takes effect within one
         // interval instead of requiring a restart. Always spawned, even when retention starts
         // off, so turning it *on* later is picked up the same way — the loop itself costs one
-        // sleeping task and one config read per day either way.
+        // sleeping task and one config read per day either way. It goes through the same
+        // `retentionSweepAttempt` and the same `gate` as the startup call above (privacy fix
+        // round 2, S2), so enabling retention on a *running* daemon gets the same notice and
+        // the same skip a restart would have given, instead of deleting silently.
         let sweepTask = Task.detached {
             await Self.runPeriodicRetentionSweeps(
                 currentRetentionDays: { Self.loadRetentionDays(paths: paths, onWarn: onWarn) },
                 sweep: { days in
-                    _ = await Self.sweepNow(
-                        retentionDays: days, store: store, onInfo: onInfo, onError: onError)
+                    _ = await Self.retentionSweepAttempt(
+                        retentionDays: days, now: Date().timeIntervalSince1970, gate: gate,
+                        preview: retentionPreview, sweepNow: sweep, onInfo: onInfo,
+                        onError: onError)
                 })
         }
 
@@ -222,6 +235,40 @@ struct DaemonCommand: AsyncParsableCommand {
         .daemonStarted, .daemonStopped, .permissionChanged,
     ]
 
+    /// Kinds the clock-skew guard ignores when it asks "what is the newest event this store has
+    /// actually observed?" (privacy fix round 2, S1).
+    ///
+    /// Every kind here is written by the daemon about *itself* or about the machine — a start,
+    /// a stop, a permission flip, an idle threshold crossing, a sleep/wake — with no observed
+    /// app or user activity behind it, stamped at whatever "now" the (possibly wrong) clock
+    /// reports. Counting them let the daemon widen what it was willing to delete:
+    ///
+    /// - the startup sweep runs *before* `daemon.started` is appended, so a fast clock made run
+    ///   1 refuse correctly and then write four rows at the bad "now"; run 2 saw those as the
+    ///   newest rows and deleted everything older;
+    /// - because the audit kinds are exempt from sweeping, one future-stamped `daemon.started`
+    ///   disarmed the guard permanently, under a perfectly correct clock;
+    /// - an unattended Mac emits `idle.started` within `capture.idle_seconds` of launch, so the
+    ///   idle kinds reproduce the same disarm on exactly the machine state — sitting idle at
+    ///   login — where a wrong clock is most likely.
+    ///
+    /// The remaining kinds all record something that was genuinely seen happening in an app, so
+    /// their timestamps are evidence about the world rather than about this process.
+    static let clockGuardIgnoredKinds: Set<EventKind> =
+        auditTrailKinds.union([.idleStarted, .idleEnded, .systemSleep, .systemWake])
+
+    /// What a retention window would remove right now, counted two ways so the notice and the
+    /// command it suggests can never disagree about the same store (privacy fix round 2, S2).
+    struct RetentionPreview: Sendable, Equatable {
+        /// Rows the automatic sweep would delete: everything past the cutoff *except* the
+        /// audit trail, which it never touches.
+        let sweepable: Int
+        /// Rows `openrhyme purge --until <N>d --dry-run` reports as `matched` for the same
+        /// cutoff — audit trail included, because `purge` is explicit user-confirmed deletion
+        /// and is deliberately not subject to the sweep's exemption.
+        let matchingPurge: Int
+    }
+
     /// How a retention sweep attempt ended, for tests — the daemon itself only ever consults
     /// `onInfo`/`onError`, never this return value.
     enum RetentionSweepOutcome: Equatable {
@@ -240,16 +287,21 @@ struct DaemonCommand: AsyncParsableCommand {
         /// deleted content's plaintext may still be recoverable on disk until a later sweep (or
         /// `openrhyme purge`) succeeds.
         case reclaimIncomplete(removed: Int)
-        /// Privacy fix round 1, J3: the computed cutoff was newer than the newest stored event,
-        /// the signature of a wrong system clock. Refused outright; nothing was touched.
+        /// Privacy fix round 1, J3: the computed cutoff was newer than the newest *observed*
+        /// event, which means either the clock is wrong or nothing has been captured for longer
+        /// than the retention window. Refused outright; nothing was touched.
         case refusedClockSkew
-        /// Could not determine whether sweeping was safe (the newest-event check itself failed);
-        /// nothing was touched.
+        /// A precheck could not be completed — the newest-event read, or the count of what the
+        /// window would remove — so it is not known whether sweeping is safe. Nothing was
+        /// touched.
         case precheckFailed
         /// Privacy fix round 1, safeguard (spec §2/§7.3 pattern): the first sweep after
         /// `retention_days` went from off to a real value was skipped so the user can review
         /// what it would delete first. Carries how many rows would have gone.
         case firstEnableReviewSkipped(count: Int)
+        /// Privacy fix round 2, S2: a later attempt in the same run, while the notice above is
+        /// still standing. Nothing is swept until the daemon restarts with retention still on.
+        case awaitingFirstEnableReview
     }
 
     /// Spec privacy §5.8/§7.7. Deletes events older than `retentionDays` and reclaims the freed
@@ -280,7 +332,7 @@ struct DaemonCommand: AsyncParsableCommand {
         deleteOlderThan: @Sendable (Double) async throws -> Int,
         vacuum: @Sendable () async throws -> Void,
         checkpoint: @Sendable () async throws -> Bool,
-        newestEventTS: @Sendable () async throws -> Double?,
+        newestObservedEventTS: @Sendable () async throws -> Double?,
         onInfo: @Sendable (String) -> Void = { _ in },
         onError: @Sendable (String) -> Void = { _ in }
     ) async -> RetentionSweepOutcome {
@@ -290,15 +342,21 @@ struct DaemonCommand: AsyncParsableCommand {
         // ago", never "N days ago or older".
         let cutoff = now - Double(retentionDays) * 86_400
 
-        // Privacy fix round 1, J3: refuse when the cutoff is newer than the newest stored
+        // Privacy fix round 1, J3: refuse when the cutoff is newer than the newest *observed*
         // event. In sane operation the newest event's ts is always >= cutoff; a cutoff beyond
-        // everything ever recorded is the signature of a wrong system clock — daemon start is
-        // login time, exactly when a Mac's clock is least trustworthy — and would otherwise
-        // delete the *entire* store, then VACUUM and checkpoint it so it isn't even forensically
-        // recoverable, and still report clean success.
+        // everything ever recorded would otherwise delete the *entire* store, then VACUUM and
+        // checkpoint it so it isn't even forensically recoverable, and still report clean
+        // success. Daemon start is login time, exactly when a Mac's clock is least trustworthy.
+        //
+        // `newestObservedEventTS` must exclude `clockGuardIgnoredKinds` (privacy fix round 2,
+        // S1) — see `sweepNow`, the only production call site. A guard that compares against
+        // rows the guarded process itself writes is not a guard: the daemon's own start/stop,
+        // permission and idle rows are stamped at the very "now" under suspicion, and the audit
+        // kinds among them are never swept, so one bad-clock start would otherwise disarm this
+        // for the life of the store.
         let newest: Double?
         do {
-            newest = try await newestEventTS()
+            newest = try await newestObservedEventTS()
         } catch {
             onError(
                 "retention: could not read the newest stored event before sweeping (\(error)); not deleting anything"
@@ -309,12 +367,14 @@ struct DaemonCommand: AsyncParsableCommand {
             let formatter = ISO8601DateFormatter()
             formatter.formatOptions = [.withInternetDateTime]
             onError(
-                "retention: refusing to sweep — the computed cutoff "
+                "retention: not sweeping — the computed cutoff "
                     + "(\(formatter.string(from: Date(timeIntervalSince1970: cutoff)))) is newer "
-                    + "than the newest stored event "
-                    + "(\(formatter.string(from: Date(timeIntervalSince1970: newest)))); the "
-                    + "system clock may be wrong. Not deleting anything; will re-check on the "
-                    + "next sweep.")
+                    + "than the newest observed event "
+                    + "(\(formatter.string(from: Date(timeIntervalSince1970: newest)))). Either "
+                    + "this Mac's clock is wrong, or nothing has been captured for longer than "
+                    + "the retention window — the two are indistinguishable from here, and one "
+                    + "of them means deleting the entire history. Nothing was touched; sweeping "
+                    + "resumes once an event newer than the cutoff is recorded.")
             return .refusedClockSkew
         }
 
@@ -362,48 +422,71 @@ struct DaemonCommand: AsyncParsableCommand {
         return .reclaimed(removed: removed)
     }
 
-    /// The startup half of the retention sweep — layered on top of `runRetentionSweep` with the
-    /// safety notice spec §2 demands for automatic deletion: "Silently deleting a user's
-    /// timeline because they typed a rule is a worse failure than the leak it fixes." Retention
-    /// is the one setting that deletes on its own, and previously had no equivalent to §7.3's
-    /// protect-rule notice.
+    /// Every automatic sweep in the daemon goes through here — the startup one and every
+    /// periodic tick — so the safety notice spec §2 demands for automatic deletion ("Silently
+    /// deleting a user's timeline because they typed a rule is a worse failure than the leak it
+    /// fixes") is one predicate applied in one place, rather than a startup-only check the
+    /// timer path walked straight past (privacy fix round 2, S2).
     ///
-    /// On the very first start after `retention_days` goes from off (0/unset) to a real value —
-    /// detected from the most recently recorded `daemon.started` row, which is why this check
-    /// only runs at startup, not on the periodic path — this counts what the new window would
-    /// immediately delete and, if that count is nonzero, reports it plainly with a reviewable
-    /// `openrhyme purge --dry-run` command and skips deleting anything this run. Every later
-    /// start (once the *previous* `daemon.started` already shows a nonzero `retentionDays`) — or
-    /// the periodic sweep later within this same run — proceeds normally.
+    /// The first time `retention_days` goes from off (0/unset) to a real value with history
+    /// already outside the new window, this reports plainly what would go and deletes nothing —
+    /// and `gate` then holds every later attempt in this process, so the notice describes a
+    /// gate rather than a 24-hour deferral. Restarting the daemon with retention still on is
+    /// the acknowledgement: the `daemon.started` row this run appends records the new
+    /// `retentionDays`, so the next start sees "already on" and sweeps. See
+    /// `RetentionReviewGate` for why that survives restarts without firing forever.
+    ///
+    /// Fails closed throughout (spec §2): if the count of what the window would remove cannot
+    /// be taken, nothing is deleted. The previous code took `(try? …) ?? 0` here, which made a
+    /// failed count indistinguishable from "nothing to delete" and swept anyway.
     @discardableResult
-    static func runStartupRetentionSweep(
-        retentionDays: Int, now: Double,
-        previousDaemonStarted: @Sendable () async throws -> RawEvent?,
-        countEligible: @Sendable (Double) async throws -> Int,
-        sweepNow: @Sendable (Int) async -> RetentionSweepOutcome,
-        onInfo: @Sendable (String) -> Void = { _ in }
+    static func retentionSweepAttempt(
+        retentionDays: Int, now: Double, gate: RetentionReviewGate,
+        preview: @Sendable (Double) async throws -> RetentionPreview,
+        sweepNow: @Sendable (Int, Double) async -> RetentionSweepOutcome,
+        onInfo: @Sendable (String) -> Void = { _ in },
+        onError: @Sendable (String) -> Void = { _ in }
     ) async -> RetentionSweepOutcome {
-        guard retentionDays > 0 else { return .skipped }
-        let previous: RawEvent? = try? await previousDaemonStarted()
-        let previousRetentionDays: Int = {
-            guard let raw = previous?.extra?["privacy"]?.objectValue?["retentionDays"]?.doubleValue
-            else { return 0 }
-            return Int(exactly: raw) ?? 0
-        }()
-        if previousRetentionDays <= 0 {
+        switch await gate.step(retentionDays: retentionDays) {
+        case .retentionOff:
+            return .skipped
+        case .proceed:
+            return await sweepNow(retentionDays, now)
+        case .awaitingReview:
+            onInfo(
+                "retention: still holding the first sweep for retention_days = \(retentionDays) "
+                    + "— nothing is deleted while this daemon keeps running. Restart it with "
+                    + "retention still on to let the sweep proceed.")
+            return .awaitingFirstEnableReview
+        case .firstEnable:
             let cutoff = now - Double(retentionDays) * 86_400
-            let wouldSweep = (try? await countEligible(cutoff)) ?? 0
-            if wouldSweep > 0 {
-                onInfo(
-                    "retention: retention_days is now \(retentionDays) (previously off) — "
-                        + "\(wouldSweep) stored event(s) are already outside this window. "
-                        + "Skipping the first automatic sweep so you can review before anything "
-                        + "is removed: run `openrhyme purge --until \(retentionDays)d --dry-run` "
-                        + "to see them.")
-                return .firstEnableReviewSkipped(count: wouldSweep)
+            let counts: RetentionPreview
+            do {
+                counts = try await preview(cutoff)
+            } catch {
+                onError(
+                    "retention: could not count what retention_days = \(retentionDays) would "
+                        + "remove (\(error)); not deleting anything")
+                return .precheckFailed
             }
+            guard counts.sweepable > 0 else {
+                // Nothing outside the new window: there is no history to review, so this is not
+                // a decision the user needs to be interrupted for.
+                await gate.allowSweeping(retentionDays: retentionDays)
+                return await sweepNow(retentionDays, now)
+            }
+            await gate.holdForReview()
+            onInfo(
+                "retention: retention_days is now \(retentionDays) (previously off) — "
+                    + "\(counts.sweepable) stored event(s) are already outside this window. "
+                    + "Nothing is deleted while this daemon keeps running; the sweep happens on "
+                    + "the next daemon start unless capture.retention_days is set back to 0 "
+                    + "first. To review them, run `openrhyme purge --until \(retentionDays)d "
+                    + "--dry-run` — it reports \(counts.matchingPurge), because it also matches "
+                    + "the daemon.started/daemon.stopped/permission.changed rows the automatic "
+                    + "sweep never removes (a real `purge --yes` would remove those too).")
+            return .firstEnableReviewSkipped(count: counts.sweepable)
         }
-        return await sweepNow(retentionDays)
     }
 
     /// The periodic half of the retention sweep: re-reads `capture.retention_days` from disk on
@@ -454,32 +537,46 @@ struct DaemonCommand: AsyncParsableCommand {
         return config.capture.retentionDays
     }
 
-    /// The most recently recorded `daemon.started` row, if any — used by
-    /// `runStartupRetentionSweep` to detect a transition from retention off to on. Pages up to
-    /// `EventQuery.maxLimit` rows; in practice a daemon restarts far less than 10,000 times
+    /// The most recently recorded `daemon.started` row, if any — how `RetentionReviewGate` is
+    /// seeded so it can detect a transition from retention off to on across restarts. Pages up
+    /// to `EventQuery.maxLimit` rows; in practice a daemon restarts far less than 10,000 times
     /// over a store's lifetime, so this always sees the true most recent one.
-    private static func mostRecentDaemonStarted(store: EventStore) async throws -> RawEvent? {
+    static func mostRecentDaemonStarted(store: EventStore) async throws -> RawEvent? {
         let rows = try await store.query(
             EventQuery(since: 0, kinds: [.daemonStarted], limit: EventQuery.maxLimit))
         return rows.last
     }
 
+    /// The `retention_days` a `daemon.started` row recorded as in force at the time, or `0` for
+    /// a missing row or a missing/unreadable value — the fail-safe direction: "no evidence
+    /// retention was on" is treated as off, which makes the next enable a first enable and
+    /// earns the notice rather than a silent sweep.
+    static func recordedRetentionDays(_ started: RawEvent?) -> Int {
+        guard let raw = started?.extra?["privacy"]?.objectValue?["retentionDays"]?.doubleValue
+        else { return 0 }
+        return Int(exactly: raw) ?? 0
+    }
+
     /// The real, store-backed sweep operation — kept in exactly one place (privacy fix round 1,
     /// J7) so the startup and periodic call sites can never drift on how a sweep actually runs:
-    /// both apply the audit-trail exemption (J5) and the clock-skew guard identically.
-    private static func sweepNow(
-        retentionDays: Int, store: EventStore,
+    /// both apply the audit-trail exemption (J5) and the clock-skew guard identically, and both
+    /// feed that guard the newest *observed* event rather than `MAX(ts)` (privacy fix round 2,
+    /// S1 — see `clockGuardIgnoredKinds`).
+    static func sweepNow(
+        retentionDays: Int, now: Double, store: EventStore,
         onInfo: @escaping @Sendable (String) -> Void,
         onError: @escaping @Sendable (String) -> Void
     ) async -> RetentionSweepOutcome {
         await runRetentionSweep(
-            retentionDays: retentionDays, now: Date().timeIntervalSince1970,
+            retentionDays: retentionDays, now: now,
             deleteOlderThan: {
                 try await store.deleteEvents(olderThan: $0, excludingKinds: Self.auditTrailKinds)
             },
             vacuum: { try await store.vacuum() },
             checkpoint: { try await store.checkpointTruncate() },
-            newestEventTS: { try await store.lastEventTS() },
+            newestObservedEventTS: {
+                try await store.lastEventTS(excludingKinds: Self.clockGuardIgnoredKinds)
+            },
             onInfo: onInfo, onError: onError)
     }
 }

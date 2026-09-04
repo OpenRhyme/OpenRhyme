@@ -70,8 +70,12 @@ private final class TestBox<Value>: @unchecked Sendable {
     /// Polls the store for a `daemon.started` row — proof that startup (including the
     /// retention sweep, which runs before it's appended) has actually completed, not just that
     /// the pidfile exists (written earlier, before the store is even opened).
+    /// `atLeast` is how many `daemon.started` rows must be present before this returns — for a
+    /// test that starts the daemon twice against one store, or seeds a previous posture row,
+    /// "at least one exists" is already true before the run under test has done anything.
     private func waitForDaemonStarted(
-        _ dir: URL, timeout: TimeInterval = 10, poll: Duration = .milliseconds(100)
+        _ dir: URL, atLeast: Int = 1, timeout: TimeInterval = 10,
+        poll: Duration = .milliseconds(100)
     ) async -> Bool {
         let dbURL = dir.appendingPathComponent("events.sqlite")
         let deadline = Date().addingTimeInterval(timeout)
@@ -79,7 +83,7 @@ private final class TestBox<Value>: @unchecked Sendable {
             if let store = try? EventStore(url: dbURL, readOnly: true) {
                 let events = (try? await store.query(EventQuery(since: 0))) ?? []
                 await store.close()
-                if events.contains(where: { $0.kind == .daemonStarted }) { return true }
+                if events.filter({ $0.kind == .daemonStarted }).count >= atLeast { return true }
             }
             try? await Task.sleep(for: poll)
         }
@@ -89,12 +93,16 @@ private final class TestBox<Value>: @unchecked Sendable {
     /// SIGTERMs the daemon and waits for it, but never longer than `timeout`: a daemon that
     /// ignores the signal is SIGKILLed and reported, so a regression fails loudly instead of
     /// hanging the suite. Returns whether SIGTERM alone was enough.
+    /// Never calls `Process.waitUntilExit()`. Foundation implements it by spinning the *calling*
+    /// thread's run loop waiting for a source registered on whichever thread called `run()`; a
+    /// Swift Testing body resumes on an arbitrary cooperative-pool thread after every `await`,
+    /// so launching and stopping from two different threads deadlocks the whole test process
+    /// indefinitely. Reproduced on an unmodified checkout of this suite; polling `isRunning`,
+    /// which the loop below already does, gives the same guarantee without the run loop —
+    /// `isRunning == false` means terminated and reaped, so `terminationStatus` is valid after.
     @discardableResult
     private func stopDaemon(_ process: Process, timeout: TimeInterval = 10) -> Bool {
-        guard process.isRunning else {
-            process.waitUntilExit()
-            return true
-        }
+        guard process.isRunning else { return true }
         process.terminate()
         let deadline = Date().addingTimeInterval(timeout)
         while process.isRunning && Date() < deadline {
@@ -102,10 +110,12 @@ private final class TestBox<Value>: @unchecked Sendable {
         }
         guard !process.isRunning else {
             kill(process.processIdentifier, SIGKILL)
-            process.waitUntilExit()
+            let killDeadline = Date().addingTimeInterval(timeout)
+            while process.isRunning && Date() < killDeadline {
+                usleep(20_000)
+            }
             return false
         }
-        process.waitUntilExit()
         return true
     }
 
@@ -214,7 +224,7 @@ private final class TestBox<Value>: @unchecked Sendable {
     // MARK: - Retention sweep (spec privacy §5.8/§7.7). `runRetentionSweep` is the pure,
     // injectable core `runDaemon()` calls at start and every 24h; these tests exercise it
     // directly with fake delete/vacuum/checkpoint, the same way `PurgeCommandTests` exercises
-    // `PurgeCommand.destroy`. `newestEventTS: { nil }` opts a test out of the J3 clock-skew
+    // `PurgeCommand.destroy`. `newestObservedEventTS: { nil }` opts a test out of the J3 clock-skew
     // guard (below) when that isn't what it's testing — `nil` (an empty store) never triggers it.
 
     @Test func retentionSweepIsSkippedWhenRetentionDaysIsZeroOrNegative() async throws {
@@ -230,7 +240,7 @@ private final class TestBox<Value>: @unchecked Sendable {
                     Issue.record("checkpoint must not run while retention is off")
                     return true
                 },
-                newestEventTS: {
+                newestObservedEventTS: {
                     Issue.record("the clock-skew precheck must not run while retention is off")
                     return nil
                 })
@@ -246,7 +256,7 @@ private final class TestBox<Value>: @unchecked Sendable {
                 seenCutoff.value = cutoff
                 return 0
             },
-            vacuum: {}, checkpoint: { true }, newestEventTS: { nil })
+            vacuum: {}, checkpoint: { true }, newestObservedEventTS: { nil })
         let expectedCutoff: Double = 1_000_000 - 30 * 86_400
         #expect(seenCutoff.value == expectedCutoff)
         #expect(outcome == .noRowsToSweep)
@@ -265,7 +275,7 @@ private final class TestBox<Value>: @unchecked Sendable {
             checkpoint: {
                 checkpointCalls.value += 1
                 return true
-            }, newestEventTS: { nil })
+            }, newestObservedEventTS: { nil })
         #expect(outcome == .noRowsToSweep)
         #expect(vacuumCalls.value == 0, "a no-op sweep must not run VACUUM at all")
         #expect(checkpointCalls.value == 0, "a no-op sweep must not run a checkpoint at all")
@@ -281,7 +291,7 @@ private final class TestBox<Value>: @unchecked Sendable {
             checkpoint: {
                 checkpointCalls.value += 1
                 return true
-            }, newestEventTS: { nil })
+            }, newestObservedEventTS: { nil })
         #expect(outcome == .reclaimed(removed: 5))
         #expect(vacuumCalls.value == 1)
         #expect(checkpointCalls.value == 1)
@@ -299,7 +309,7 @@ private final class TestBox<Value>: @unchecked Sendable {
             checkpoint: {
                 Issue.record("checkpoint must not run after a failed delete")
                 return true
-            }, newestEventTS: { nil },
+            }, newestObservedEventTS: { nil },
             onError: { errors.value.append($0) })
         #expect(outcome == .deleteFailed)
         #expect(errors.value.count == 1)
@@ -311,7 +321,7 @@ private final class TestBox<Value>: @unchecked Sendable {
             retentionDays: 1, now: 1_000_000, vacuumAttempts: 2, sleep: noSleep,
             deleteOlderThan: { _ in 3 },
             vacuum: { throw DatabaseError(code: 5, message: "database is locked") },
-            checkpoint: { true }, newestEventTS: { nil },
+            checkpoint: { true }, newestObservedEventTS: { nil },
             onError: { errors.value.append($0) })
         #expect(outcome == .reclaimIncomplete(removed: 3))
         #expect(errors.value.contains { $0.contains("VACUUM") })
@@ -323,7 +333,7 @@ private final class TestBox<Value>: @unchecked Sendable {
             retentionDays: 1, now: 1_000_000, vacuumAttempts: 2, sleep: noSleep,
             deleteOlderThan: { _ in 3 },
             vacuum: {},
-            checkpoint: { false }, newestEventTS: { nil },
+            checkpoint: { false }, newestObservedEventTS: { nil },
             onError: { errors.value.append($0) })
         #expect(outcome == .reclaimIncomplete(removed: 3))
         #expect(errors.value.contains { $0.contains("checkpoint") })
@@ -346,13 +356,16 @@ private final class TestBox<Value>: @unchecked Sendable {
             },
             vacuum: { vacuumCalled.value = true },
             checkpoint: { true },
-            newestEventTS: { 1_000_000 - 400 * 86_400 },
+            newestObservedEventTS: { 1_000_000 - 400 * 86_400 },
             onError: { errors.value.append($0) })
         #expect(outcome == .refusedClockSkew)
         #expect(!deleteCalled.value, "must not delete anything when the clock looks wrong")
         #expect(!vacuumCalled.value)
         #expect(errors.value.count == 1)
-        #expect(errors.value[0].contains("clock"))
+        // Privacy fix round 2, M1: `errors.value[0]` here traps on an empty array, so a
+        // regression in the guard above took down the whole test process ("Fatal error: Index
+        // out of range", signal 5) instead of reporting these expectations as failures.
+        #expect(errors.value.first?.contains("clock") == true)
     }
 
     /// A sane cutoff (well within the newest event's age) must sweep normally — the guard must
@@ -362,7 +375,7 @@ private final class TestBox<Value>: @unchecked Sendable {
             retentionDays: 1, now: 1_000_000, sleep: noSleep,
             deleteOlderThan: { _ in 4 },
             vacuum: {}, checkpoint: { true },
-            newestEventTS: { 1_000_000 - 10 })
+            newestObservedEventTS: { 1_000_000 - 10 })
         #expect(outcome == .reclaimed(removed: 4))
     }
 
@@ -379,7 +392,7 @@ private final class TestBox<Value>: @unchecked Sendable {
                 Issue.record("checkpoint must not run when the precheck fails")
                 return true
             },
-            newestEventTS: { throw DatabaseError(code: 5, message: "database is locked") },
+            newestObservedEventTS: { throw DatabaseError(code: 5, message: "database is locked") },
             onError: { errors.value.append($0) })
         #expect(outcome == .precheckFailed)
         #expect(errors.value.count == 1)
@@ -412,7 +425,7 @@ private final class TestBox<Value>: @unchecked Sendable {
             deleteOlderThan: { try await sweeper.deleteEvents(olderThan: $0) },
             vacuum: { try await sweeper.vacuum() },
             checkpoint: { try await sweeper.checkpointTruncate() },
-            newestEventTS: { try await sweeper.lastEventTS() })
+            newestObservedEventTS: { try await sweeper.lastEventTS() })
         #expect(outcome == .reclaimed(removed: 1))
         let remaining = try await sweeper.query(EventQuery(since: 0))
         await sweeper.close()
@@ -463,7 +476,7 @@ private final class TestBox<Value>: @unchecked Sendable {
             deleteOlderThan: { try await sweeper.deleteEvents(olderThan: $0) },
             vacuum: { try await sweeper.vacuum() },
             checkpoint: { try await sweeper.checkpointTruncate() },
-            newestEventTS: { try await sweeper.lastEventTS() })
+            newestObservedEventTS: { try await sweeper.lastEventTS() })
         await sweeper.close()
         #expect(outcome == .reclaimed(removed: 200))
 
@@ -843,5 +856,318 @@ private final class TestBox<Value>: @unchecked Sendable {
             events.contains { $0.windowTitle == "should-survive" },
             "a string-typed retention_days must be treated as off (0), never silently parsed as a real window"
         )
+    }
+
+    // MARK: - Privacy fix round 2, S1: the clock-skew guard must not be answerable with rows
+    // the daemon wrote about itself. Every assertion below is on what is still *in the store*
+    // after a real daemon start/stop, never on a returned enum or a log line.
+
+    /// The measured hole: one `daemon.started` stamped in the future — what a single start
+    /// under a fast clock leaves behind, and which the audit-trail exemption (J5) then makes
+    /// unsweepable forever — used to be `MAX(ts)`, so the guard saw a "newest event" far ahead
+    /// of any cutoff and waved every later sweep through under a perfectly correct clock.
+    @Test func futureStampedAuditRowsDoNotWidenWhatTheAutomaticSweepDeletes() async throws {
+        let dir = try CLIRunner.tempDataDir()
+        let dbURL = dir.appendingPathComponent("events.sqlite")
+        let now = Date().timeIntervalSince1970
+        let store = try EventStore(url: dbURL)
+        // Exactly what a start under a clock 400 days fast writes: the posture row (recording
+        // retention already on, so the first-enable gate is not what is under test here), a
+        // permission row and a stop row — all three exempt from sweeping, all three in the
+        // future relative to a correct clock.
+        try await store.append(
+            RawEvent(
+                ts: now + 400 * 86_400, kind: .daemonStarted,
+                extra: ["privacy": .object(["retentionDays": .number(1)])]))
+        try await store.append(RawEvent(ts: now + 400 * 86_400, kind: .permissionChanged))
+        try await store.append(RawEvent(ts: now + 400 * 86_400, kind: .daemonStopped))
+        try await store.append(
+            RawEvent(
+                ts: now - 10 * 86_400, kind: .contextSnapshot, bundleID: "com.a",
+                windowTitle: "old-content"))
+        await store.close()
+
+        var settings = CaptureSettings()
+        settings.retentionDays = 1
+        try Config(capture: settings).save(to: dir.appendingPathComponent("config.json"))
+
+        let daemon = try launchDaemon(dataDir: dir)
+        #expect(await waitForPIDFile(dir), "daemon did not write daemon.pid")
+        #expect(
+            await waitForDaemonStarted(dir, atLeast: 2),
+            "daemon did not record its own daemon.started")
+        #expect(stopDaemon(daemon), "daemon did not exit within 10s of SIGTERM")
+
+        let after = try EventStore(url: dbURL, readOnly: true)
+        let events = try await after.query(EventQuery(since: 0))
+        await after.close()
+        #expect(
+            events.contains { $0.windowTitle == "old-content" },
+            "a future-stamped audit row must not license deleting content the guard would otherwise protect"
+        )
+    }
+
+    /// The two-run scenario, reproduced without touching the real clock: a store whose newest
+    /// *observed* row is already outside the retention window makes the guard refuse (run 1),
+    /// and the rows that start then writes about itself must not make run 2 sweep the very
+    /// history run 1 declined to touch. This is the measured
+    /// "clock a year fast → refuse → restart → everything old is gone" sequence: what made run
+    /// 2 different was only the `daemon.started`/`permission.changed`/`idle.started` rows run 1
+    /// left at the suspect "now".
+    @Test func aRefusedSweepStaysRefusedOnTheNextStartInsteadOfBeingUnlockedByRunOnesOwnRows()
+        async throws
+    {
+        let dir = try CLIRunner.tempDataDir()
+        let dbURL = dir.appendingPathComponent("events.sqlite")
+        let now = Date().timeIntervalSince1970
+        let store = try EventStore(url: dbURL)
+        // Retention already on, so neither run takes the first-enable path — this test is only
+        // about the guard.
+        try await store.append(
+            RawEvent(
+                ts: now - 11 * 86_400, kind: .daemonStarted,
+                extra: ["privacy": .object(["retentionDays": .number(1)])]))
+        try await store.append(
+            RawEvent(
+                ts: now - 10 * 86_400, kind: .contextSnapshot, bundleID: "com.a",
+                windowTitle: "history"))
+        await store.close()
+
+        var settings = CaptureSettings()
+        settings.retentionDays = 1
+        try Config(capture: settings).save(to: dir.appendingPathComponent("config.json"))
+
+        for run in 1...2 {
+            let daemon = try launchDaemon(dataDir: dir)
+            #expect(await waitForPIDFile(dir), "run \(run): daemon did not write daemon.pid")
+            #expect(
+                await waitForDaemonStarted(dir, atLeast: run + 1),
+                "run \(run): no daemon.started recorded for this run")
+            #expect(stopDaemon(daemon), "run \(run): daemon did not exit within 10s of SIGTERM")
+
+            let after = try EventStore(url: dbURL, readOnly: true)
+            let events = try await after.query(EventQuery(since: 0))
+            await after.close()
+            #expect(
+                events.contains { $0.windowTitle == "history" },
+                "run \(run): the daemon's own start/stop/permission/idle rows must not widen what it will delete"
+            )
+        }
+    }
+
+    // MARK: - Privacy fix round 2, S2: the first-enable notice must gate the sweep, on every
+    // path, for the whole run — not defer it by one tick on the startup path only.
+
+    /// The production periodic wiring, built against a real store and a real `config.json` so
+    /// these assertions are about rows in the database, not about a returned enum.
+    private func retentionWiring(
+        dir: URL, store: EventStore, log: TestBox<[String]>
+    ) -> (
+        preview: @Sendable (Double) async throws -> DaemonCommand.RetentionPreview,
+        sweep: @Sendable (Int, Double) async -> DaemonCommand.RetentionSweepOutcome,
+        onInfo: @Sendable (String) -> Void
+    ) {
+        let onInfo: @Sendable (String) -> Void = { log.value.append($0) }
+        return (
+            preview: { cutoff in
+                DaemonCommand.RetentionPreview(
+                    sweepable: try await store.countEvents(
+                        olderThan: cutoff, excludingKinds: DaemonCommand.auditTrailKinds),
+                    matchingPurge: try await store.countEvents(olderThan: cutoff))
+            },
+            sweep: { days, at in
+                await DaemonCommand.sweepNow(
+                    retentionDays: days, now: at, store: store, onInfo: onInfo, onError: { _ in })
+            },
+            onInfo: onInfo
+        )
+    }
+
+    /// Hole 1: `config.json` is just a file, nothing says a restart is needed, and `openrhyme
+    /// status`/`privacy` show the new value immediately — so turning retention on while the
+    /// daemon runs was the likeliest path, and it used to reach the sweep with no notice and no
+    /// skip at all. The periodic tick now applies the same predicate the startup path does.
+    @Test func enablingRetentionOnARunningDaemonNoticesAndSkipsJustLikeAStartupEnable()
+        async throws
+    {
+        let dir = try CLIRunner.tempDataDir()
+        let paths = Paths(dataDir: dir)
+        let now = Date().timeIntervalSince1970
+        let store = try EventStore(url: paths.databaseURL)
+        try await store.append(
+            RawEvent(
+                ts: now - 10 * 86_400, kind: .contextSnapshot, bundleID: "com.a",
+                windowTitle: "already-old"))
+        // A recent row so the clock-skew guard would *not* be what stops this sweep.
+        try await store.append(
+            RawEvent(ts: now - 100, kind: .contextSnapshot, bundleID: "com.a", windowTitle: "new"))
+        try Config(capture: CaptureSettings()).save(to: paths.configURL)
+
+        let log = TestBox<[String]>([])
+        let wiring = retentionWiring(dir: dir, store: store, log: log)
+        // The daemon started with retention off, exactly as `config.json` says right now.
+        let gate = RetentionReviewGate(previousRetentionDays: 0)
+        await DaemonCommand.retentionSweepAttempt(
+            retentionDays: 0, now: now, gate: gate, preview: wiring.preview,
+            sweepNow: wiring.sweep, onInfo: wiring.onInfo)
+
+        // The user edits config.json and does not restart.
+        var enabled = CaptureSettings()
+        enabled.retentionDays = 1
+        try Config(capture: enabled).save(to: paths.configURL)
+
+        let tick = TestBox(0)
+        await DaemonCommand.runPeriodicRetentionSweeps(
+            sleep: { _ in
+                if tick.value >= 1 { throw CancellationError() }
+                tick.value += 1
+            },
+            currentRetentionDays: {
+                DaemonCommand.loadRetentionDays(paths: paths, onWarn: { _ in })
+            },
+            sweep: { days in
+                _ = await DaemonCommand.retentionSweepAttempt(
+                    retentionDays: days, now: Date().timeIntervalSince1970, gate: gate,
+                    preview: wiring.preview, sweepNow: wiring.sweep, onInfo: wiring.onInfo)
+            })
+
+        let events = try await store.query(EventQuery(since: 0))
+        await store.close()
+        #expect(
+            events.contains { $0.windowTitle == "already-old" },
+            "enabling retention on a running daemon must not delete pre-existing history without notice"
+        )
+        #expect(
+            log.value.contains { $0.contains("retention_days is now 1 (previously off)") },
+            "the periodic path must give the same notice a restart would, got: \(log.value)")
+    }
+
+    /// Hole 2: the notice said "Skipping the first automatic sweep so you can review before
+    /// anything is removed", but the skip applied only to the startup call — the periodic loop
+    /// spawned 70 lines later deleted the very row the notice named, in the same uninterrupted
+    /// run. The gate now holds for the process, and the notice says so.
+    @Test func theFirstEnableSkipHoldsForTheWholeRunNotJustTheStartupCall() async throws {
+        let dir = try CLIRunner.tempDataDir()
+        let paths = Paths(dataDir: dir)
+        let now = Date().timeIntervalSince1970
+        let store = try EventStore(url: paths.databaseURL)
+        try await store.append(
+            RawEvent(
+                ts: now - 10 * 86_400, kind: .contextSnapshot, bundleID: "com.a",
+                windowTitle: "the-row-the-notice-named"))
+        try await store.append(
+            RawEvent(ts: now - 100, kind: .contextSnapshot, bundleID: "com.a", windowTitle: "new"))
+        // Three ancient audit rows, so the notice's count and what `purge` would report differ
+        // — the notice has to state both rather than quoting a number the suggested command
+        // will contradict.
+        for kind in [EventKind.daemonStopped, .permissionChanged, .daemonStopped] {
+            try await store.append(RawEvent(ts: now - 20 * 86_400, kind: kind))
+        }
+
+        let log = TestBox<[String]>([])
+        let wiring = retentionWiring(dir: dir, store: store, log: log)
+        let gate = RetentionReviewGate(previousRetentionDays: 0)
+        let startup = await DaemonCommand.retentionSweepAttempt(
+            retentionDays: 1, now: now, gate: gate, preview: wiring.preview,
+            sweepNow: wiring.sweep, onInfo: wiring.onInfo)
+        #expect(startup == .firstEnableReviewSkipped(count: 1))
+
+        // The next periodic tick, same process, same gate.
+        let tick = await DaemonCommand.retentionSweepAttempt(
+            retentionDays: 1, now: now + 86_400, gate: gate, preview: wiring.preview,
+            sweepNow: wiring.sweep, onInfo: wiring.onInfo)
+        #expect(tick == .awaitingFirstEnableReview)
+
+        let events = try await store.query(EventQuery(since: 0))
+        await store.close()
+        #expect(
+            events.contains { $0.windowTitle == "the-row-the-notice-named" },
+            "the row the notice promised to keep must survive the next tick of the same run")
+        let notice = try #require(
+            log.value.first { $0.contains("retention_days is now 1 (previously off)") })
+        #expect(
+            notice.contains("1 stored event(s)"),
+            "the notice must count what the sweep would remove, got: \(notice)")
+        #expect(
+            notice.contains("--dry-run` — it reports 4"),
+            "the notice must state what the command it suggests will report, got: \(notice)")
+        #expect(
+            !notice.contains("Skipping the first automatic sweep"),
+            "the old wording described a review gate it did not perform")
+    }
+
+    /// Hole 3: `(try? await countEligible(cutoff)) ?? 0` made a failed count indistinguishable
+    /// from "nothing to delete" and swept anyway — while its sibling one line above failed safe.
+    @Test func aFailedEligibilityCountFailsClosedAndSweepsNothing() async throws {
+        let swept = TestBox(false)
+        let errors = TestBox<[String]>([])
+        let outcome = await DaemonCommand.retentionSweepAttempt(
+            retentionDays: 1, now: 1_000_000, gate: RetentionReviewGate(previousRetentionDays: 0),
+            preview: { _ in throw DatabaseError(code: 5, message: "database is locked") },
+            sweepNow: { _, _ in
+                swept.value = true
+                return .noRowsToSweep
+            },
+            onError: { errors.value.append($0) })
+        #expect(outcome == .precheckFailed)
+        #expect(!swept.value, "a count that failed must never be read as 'nothing to delete'")
+        #expect(errors.value.first?.contains("could not count") == true)
+    }
+
+    /// Nothing outside the new window is not a decision worth interrupting anyone for: the
+    /// notice must not fire, and the gate must not hold later ticks hostage.
+    @Test func firstEnableWithNothingOutsideTheWindowSweepsWithoutANotice() async throws {
+        let sweeps = TestBox(0)
+        let log = TestBox<[String]>([])
+        let gate = RetentionReviewGate(previousRetentionDays: 0)
+        for _ in 0..<2 {
+            _ = await DaemonCommand.retentionSweepAttempt(
+                retentionDays: 1, now: 1_000_000, gate: gate,
+                preview: { _ in DaemonCommand.RetentionPreview(sweepable: 0, matchingPurge: 0) },
+                sweepNow: { _, _ in
+                    sweeps.value += 1
+                    return .noRowsToSweep
+                },
+                onInfo: { log.value.append($0) })
+        }
+        #expect(sweeps.value == 2)
+        #expect(log.value.isEmpty, "nothing to review means nothing to announce")
+    }
+
+    // MARK: - The gate's own state machine (privacy fix round 2, S2).
+
+    @Test func theGateNoticesEachOffToOnTransitionAndNotTheStepsBetween() async throws {
+        // Seeded from a previous daemon.started that recorded retention already on.
+        let alreadyOn = RetentionReviewGate(previousRetentionDays: 30)
+        #expect(await alreadyOn.step(retentionDays: 30) == .proceed)
+        #expect(await alreadyOn.step(retentionDays: 30) == .proceed)
+
+        let fresh = RetentionReviewGate(previousRetentionDays: 0)
+        #expect(await fresh.step(retentionDays: 1) == .firstEnable)
+        await fresh.holdForReview()
+        #expect(await fresh.step(retentionDays: 1) == .awaitingReview)
+        // Turning retention back off releases the hold and resets the transition, so switching
+        // it on again in the same run is a fresh off→on and earns a fresh notice.
+        #expect(await fresh.step(retentionDays: 0) == .retentionOff)
+        #expect(await fresh.step(retentionDays: 1) == .firstEnable)
+        await fresh.allowSweeping(retentionDays: 1)
+        #expect(await fresh.step(retentionDays: 1) == .proceed)
+    }
+
+    @Test func recordedRetentionDaysReadsThePostureRowAndFailsSafeWhenItCannot() {
+        #expect(DaemonCommand.recordedRetentionDays(nil) == 0)
+        #expect(
+            DaemonCommand.recordedRetentionDays(RawEvent(ts: 0, kind: .daemonStarted)) == 0,
+            "no posture recorded must read as 'retention was off', so the next enable notices")
+        #expect(
+            DaemonCommand.recordedRetentionDays(
+                RawEvent(
+                    ts: 0, kind: .daemonStarted,
+                    extra: ["privacy": .object(["retentionDays": .number(30)])])) == 30)
+        #expect(
+            DaemonCommand.recordedRetentionDays(
+                RawEvent(
+                    ts: 0, kind: .daemonStarted,
+                    extra: ["privacy": .object(["retentionDays": .number(1.5)])])) == 0)
     }
 }

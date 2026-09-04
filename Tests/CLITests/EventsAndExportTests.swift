@@ -104,7 +104,8 @@ import Testing
     }
 
     @Test func badTimeIsAUsageError() throws {
-        let result = try CLIRunner.run(["events", "--since", "yesterday", "--json"])
+        let result = try CLIRunner.run(
+            ["events", "--since", "yesterday", "--json"], env: try CLIRunner.tempEnv())
         #expect(result.status == 2)
         #expect(
             (try CLIRunner.json(result.stdout)["error"] as? [String: Any])?["code"] as? String
@@ -290,10 +291,28 @@ import Testing
     // MARK: - J11: `--max-value-chars` help says "0 = full" — a negative value is not a third
     // meaning and must be rejected, not silently treated as full.
 
-    @Test func negativeMaxValueCharsIsRejected() throws {
+    /// Privacy fix round 2, S6: this used the *space-separated* form, which ArgumentParser
+    /// rejects at parse time as a missing option value — before `EventsCommand.validate()` is
+    /// ever reached — so it exited 2 on the unfixed code too and tested nothing. The `=` form
+    /// (how a script that computed a negative budget emits it) is what actually reaches
+    /// `validate()`, and the store is seeded so that without the fix the command would succeed
+    /// and return the full value rather than fail for some unrelated reason.
+    @Test func negativeMaxValueCharsIsRejected() async throws {
+        let dir = try CLIRunner.tempDataDir()
+        let store = try EventStore(url: dir.appendingPathComponent("events.sqlite"))
+        try await store.append(
+            RawEvent(
+                ts: 100, kind: .contextSnapshot, bundleID: "com.apple.TextEdit",
+                value: String(repeating: "x", count: 50)))
+        await store.close()
+
         let result = try CLIRunner.run(
-            ["events", "--since", "0", "--max-value-chars", "-1", "--json"])
+            ["events", "--since", "0", "--max-value-chars=-1", "--json"],
+            env: ["OPENRHYME_DATA_DIR": dir.path])
         #expect(result.status == 2 || result.status == 64)  // ArgumentParser uses EX_USAGE
+        #expect(
+            result.stderr.contains("--max-value-chars must be >= 0"),
+            "expected the validation message, got: \(result.stderr)\(result.stdout)")
     }
 
     // MARK: - J12: when `--max-value-chars` actually cuts `value`/`selected_text`,

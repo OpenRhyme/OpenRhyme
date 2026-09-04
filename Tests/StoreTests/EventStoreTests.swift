@@ -89,6 +89,28 @@ import Testing
         #expect(try await store.lastEventTS() == nil)
     }
 
+    /// Privacy fix round 2, S1: the retention sweep's clock-skew guard needs "the newest event
+    /// this store actually observed", which must not be answerable with rows the daemon wrote
+    /// about itself — those carry whatever "now" the suspect clock reported.
+    @Test func lastEventTSCanIgnoreGivenKinds() async throws {
+        let store = try EventStore(url: tempURL())
+        try await store.append(RawEvent(ts: 100, kind: .contextSnapshot, bundleID: "com.a"))
+        try await store.append(RawEvent(ts: 999_999, kind: .daemonStarted))
+        try await store.append(RawEvent(ts: 999_998, kind: .idleStarted))
+        #expect(try await store.lastEventTS() == 999_999)
+        #expect(try await store.lastEventTS(excludingKinds: []) == 999_999)
+        #expect(try await store.lastEventTS(excludingKinds: [.daemonStarted]) == 999_998)
+        #expect(try await store.lastEventTS(excludingKinds: [.daemonStarted, .idleStarted]) == 100)
+    }
+
+    /// Excluding every kind that is present must report "nothing observed" (nil), not 0 — a 0
+    /// would read as an epoch-old event and let a sweep of an effectively empty store proceed.
+    @Test func lastEventTSIsNilWhenEveryRowIsExcluded() async throws {
+        let store = try EventStore(url: tempURL())
+        try await store.append(RawEvent(ts: 100, kind: .daemonStarted))
+        #expect(try await store.lastEventTS(excludingKinds: [.daemonStarted]) == nil)
+    }
+
     @Test func afterIDPagingOrdersByIDSoNonMonotonicTSNeverSkipsRows() async throws {
         let store = try EventStore(url: tempURL())
         // ts values are NOT monotonic in insertion order (e.g. a backward clock

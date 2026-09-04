@@ -774,12 +774,16 @@ import Testing
         return false
     }
 
+    /// Never calls `Process.waitUntilExit()`. Foundation implements it by spinning the *calling*
+    /// thread's run loop waiting for a source registered on whichever thread called `run()`; a
+    /// Swift Testing body resumes on an arbitrary cooperative-pool thread after every `await`,
+    /// so launching and stopping from two different threads deadlocks the whole test process
+    /// indefinitely. Reproduced on an unmodified checkout of this suite; polling `isRunning`,
+    /// which the loop below already does, gives the same guarantee without the run loop —
+    /// `isRunning == false` means terminated and reaped, so `terminationStatus` is valid after.
     @discardableResult
     private func stopDaemon(_ process: Process, timeout: TimeInterval = 10) -> Bool {
-        guard process.isRunning else {
-            process.waitUntilExit()
-            return true
-        }
+        guard process.isRunning else { return true }
         process.terminate()
         let deadline = Date().addingTimeInterval(timeout)
         while process.isRunning && Date() < deadline {
@@ -787,10 +791,12 @@ import Testing
         }
         guard !process.isRunning else {
             kill(process.processIdentifier, SIGKILL)
-            process.waitUntilExit()
+            let killDeadline = Date().addingTimeInterval(timeout)
+            while process.isRunning && Date() < killDeadline {
+                usleep(20_000)
+            }
             return false
         }
-        process.waitUntilExit()
         return true
     }
 

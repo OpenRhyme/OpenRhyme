@@ -161,8 +161,25 @@ public actor EventStore {
         Int64(try db.scalarString("SELECT COUNT(*) FROM events") ?? "0") ?? 0
     }
 
-    public func lastEventTS() throws -> Double? {
-        try db.scalarString("SELECT MAX(ts) FROM events").flatMap(Double.init)
+    /// The newest `ts` in the store, or `nil` when it is empty.
+    ///
+    /// `excludingKinds` (privacy fix round 2, S1) exists for the retention sweep's clock-skew
+    /// guard, which asks "what is the newest thing this store has actually observed?" and must
+    /// not be answerable with rows the daemon wrote about *itself* at the very "now" the guard
+    /// is trying to sanity-check — otherwise a single bad-clock start permanently widens what
+    /// later starts are willing to delete. Defaults to empty, so `status` and every other
+    /// existing caller is unchanged.
+    public func lastEventTS(excludingKinds: Set<EventKind> = []) throws -> Double? {
+        guard !excludingKinds.isEmpty else {
+            return try db.scalarString("SELECT MAX(ts) FROM events").flatMap(Double.init)
+        }
+        let placeholders = Array(repeating: "?", count: excludingKinds.count).joined(
+            separator: ", ")
+        let statement = try db.prepare(
+            "SELECT MAX(ts) FROM events WHERE kind NOT IN (\(placeholders))"
+        ).bind(excludingKinds.map { .text($0.rawValue) })
+        guard try statement.step() else { return nil }
+        return statement.double(0)
     }
 
     /// Spec privacy §5.6/§5.7. Returns the number of rows actually removed, so a caller can
