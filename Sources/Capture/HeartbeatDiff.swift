@@ -229,15 +229,26 @@ public enum HeartbeatDiff {
             {
                 extra["previousTitle"] = .string(previousTitle)
             }
-            events.append(
-                RawEvent(
-                    ts: input.now, kind: input.trigger.kind, pid: app.pid, bundleID: app.bundleID,
-                    appName: app.name, windowTitle: context.window?.title,
-                    document: context.window?.document, url: context.window?.url,
-                    role: element?.role, subrole: element?.subrole,
-                    identifier: element?.identifier, elementTitle: element?.title,
-                    value: valueUnchanged ? nil : redacted.value,
-                    selectedText: redacted.selectedText, extra: extra))
+            var event = RawEvent(
+                ts: input.now, kind: input.trigger.kind, pid: app.pid, bundleID: app.bundleID,
+                appName: app.name, windowTitle: context.window?.title,
+                document: context.window?.document, url: context.window?.url,
+                role: element?.role, subrole: element?.subrole,
+                identifier: element?.identifier, elementTitle: element?.title,
+                value: valueUnchanged ? nil : redacted.value,
+                selectedText: redacted.selectedText, extra: extra)
+            // Whole-branch review H2: the row's remaining text columns — window title,
+            // document, URL, element title and `extra.previousTitle` — get the same secret
+            // redaction `value`/`selected_text` already had, so nothing is written to disk in
+            // the clear that a read would have hidden. Deliberately last: `signature`,
+            // `extra.fingerprint` and `extra.valueHash` above are all computed from the raw
+            // text, so dedup and the Compact grouping key are unchanged by this.
+            let alsoRedacted = EventRedaction.apply(to: &event, policy: input.policy)
+            if !alsoRedacted.isEmpty {
+                let rules = Set(redacted.redactedRules).union(alsoRedacted).sorted()
+                event.extra?["redacted"] = .array(rules.map(JSONValue.string))
+            }
+            events.append(event)
             if !valueUnchanged, let hash {
                 state.recentHashes[app.pid, default: RecentValueHashes()].insert(
                     hash, now: input.now, ttl: input.contentMemorySeconds)

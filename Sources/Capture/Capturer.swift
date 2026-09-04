@@ -163,10 +163,16 @@ public final class Capturer {
             state.lastWindowTitle = nil
             return
         }
-        emit(
-            RawEvent(
-                ts: change.ts, kind: .menuItemSelected, pid: app.pid, bundleID: app.bundleID,
-                appName: app.name, elementTitle: change.menuTitle))
+        // Whole-branch review H2: a menu title is stored text like any other, so it goes through
+        // the same capture-time secret redaction as the heartbeat's columns.
+        var event = RawEvent(
+            ts: change.ts, kind: .menuItemSelected, pid: app.pid, bundleID: app.bundleID,
+            appName: app.name, elementTitle: change.menuTitle)
+        let redacted = EventRedaction.apply(to: &event, policy: privacyPolicy)
+        if !redacted.isEmpty {
+            event.extra = ["redacted": .array(redacted.map(JSONValue.string))]
+        }
+        emit(event)
     }
 
     /// The protect verdict for a menu selection. The bundle-id rule needs no window, so it is

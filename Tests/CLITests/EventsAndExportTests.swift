@@ -187,6 +187,71 @@ import Testing
         #expect(rows.first?["value"] as? String == "token AKIAQQQQWWWWEEEERRRR end")
     }
 
+    // MARK: - H3 (whole-branch review): the owner could not search their own history. Every read
+    // path redacted unconditionally, so a search for the key they were worried about came back
+    // empty from `events`/`export` while `strings` on the database file found it — two commands
+    // telling the user it is not there when it is. `--ignore-privacy` is the opt-in escape hatch,
+    // named after the precedent `inspect` set: explicit, warned on stderr, never the default.
+
+    /// A row seeded raw, exactly like one captured before the rule existed — the only kind the
+    /// read path is still the sole protection for.
+    private func seededWithARawSecret() async throws -> (env: [String: String], secret: String) {
+        let dir = try CLIRunner.tempDataDir()
+        let store = try EventStore(url: dir.appendingPathComponent("events.sqlite"))
+        try await store.append(
+            RawEvent(
+                ts: 100, kind: .contextSnapshot, bundleID: "com.apple.Safari",
+                windowTitle: "Report AKIAQQQQWWWWEEEERRRR",
+                url: "https://ex.com/?token=AKIAQQQQWWWWEEEERRRR",
+                value: "token AKIAQQQQWWWWEEEERRRR end"))
+        await store.close()
+        return (["OPENRHYME_DATA_DIR": dir.path], "AKIAQQQQWWWWEEEERRRR")
+    }
+
+    @Test func eventsIgnorePrivacyReturnsStoredTextUnredactedAndWarnsOnStderr() async throws {
+        let (env, secret) = try await seededWithARawSecret()
+
+        let redacted = try CLIRunner.run(["events", "--since", "0", "--json"], env: env)
+        #expect(redacted.status == 0, "\(redacted.stderr)")
+        #expect(!redacted.stdout.contains(secret))
+        #expect(redacted.stderr.isEmpty)
+
+        let raw = try CLIRunner.run(
+            ["events", "--since", "0", "--json", "--ignore-privacy"], env: env)
+        #expect(raw.status == 0, "\(raw.stderr)")
+        let rows = try #require(
+            (try CLIRunner.json(raw.stdout)["data"] as? [String: Any])?["events"]
+                as? [[String: Any]])
+        let row = try #require(rows.first)
+        #expect(row["value"] as? String == "token \(secret) end")
+        #expect(row["window_title"] as? String == "Report \(secret)")
+        #expect(row["url"] as? String == "https://ex.com/?token=\(secret)")
+        // The warning goes to stderr only, so `--json` stdout stays parseable.
+        #expect(
+            raw.stderr.contains(
+                "warning: --ignore-privacy returns stored text unredacted"))
+        #expect(!raw.stdout.contains("warning:"))
+    }
+
+    @Test func exportIgnorePrivacyReturnsStoredTextUnredactedAndWarnsOnStderr() async throws {
+        let (env, secret) = try await seededWithARawSecret()
+
+        let redacted = try CLIRunner.run(["export", "--since", "0"], env: env)
+        #expect(redacted.status == 0, "\(redacted.stderr)")
+        #expect(!redacted.stdout.contains(secret))
+
+        let raw = try CLIRunner.run(["export", "--since", "0", "--ignore-privacy"], env: env)
+        #expect(raw.status == 0, "\(raw.stderr)")
+        #expect(raw.stdout.contains(secret))
+        #expect(
+            raw.stderr.contains(
+                "warning: --ignore-privacy returns stored text unredacted"))
+        // The JSONL body itself never carries the warning — it stays machine-readable.
+        for line in raw.stdout.split(separator: "\n") {
+            _ = try JSONSerialization.jsonObject(with: Data(line.utf8))
+        }
+    }
+
     @Test func maxValueCharsTruncatesAndZeroMeansFull() async throws {
         let dir = try CLIRunner.tempDataDir()
         let store = try EventStore(url: dir.appendingPathComponent("events.sqlite"))

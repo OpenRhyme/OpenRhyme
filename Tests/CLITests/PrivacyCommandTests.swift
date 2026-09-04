@@ -101,7 +101,7 @@ import Testing
         let dir = try await seeded()
         let result = try CLIRunner.run(["privacy"], env: ["OPENRHYME_DATA_DIR": dir.path])
         #expect(result.status == 0, "\(result.stderr)")
-        #expect(result.stdout.contains("stored rows matching current rules: 1"))
+        #expect(result.stdout.contains("stored rows a protect rule matches: 1"))
         #expect(
             result.stdout.contains(
                 "1 stored rows match the current rules; remove them with: openrhyme purge --apply-rules --yes"
@@ -118,7 +118,7 @@ import Testing
         await store.close()
         let result = try CLIRunner.run(["privacy"], env: ["OPENRHYME_DATA_DIR": dir.path])
         #expect(result.status == 0, "\(result.stderr)")
-        #expect(result.stdout.contains("stored rows matching current rules: 0"))
+        #expect(result.stdout.contains("stored rows a protect rule matches: 0"))
         // The per-match removal sentence is conditional on a nonzero count, in either state...
         #expect(
             !result.stdout.contains(
@@ -128,6 +128,32 @@ import Testing
         // the specific `purge --apply-rules` command — that command is only ever mentioned next
         // to the count it actually applies to (see the disabled-state tests below for why).
         #expect(result.stdout.contains("only change what gets captured from now on"))
+    }
+
+    /// Whole-branch review, honesty defect: a worried user gets stuck by being *reassured*. The
+    /// old line — "stored rows matching current rules: 0" — reads as "nothing sensitive is
+    /// stored" while meaning only "no protect rule matches", and at the same moment `events`
+    /// returned nothing for a search that finds the secret directly in the file. The caveat must
+    /// ride on the number itself, in both the enabled and the disabled wording, so the count can
+    /// never be skimmed or quoted as a clean bill of health.
+    @Test func theMatchCountSaysPlainlyThatItIsNotAVerdictOnStoredSecrets() async throws {
+        let dir = try CLIRunner.tempDataDir()
+        let store = try EventStore(url: dir.appendingPathComponent("events.sqlite"))
+        // A row no protect rule matches, holding a secret: precisely the case the count misses.
+        try await store.append(
+            RawEvent(
+                ts: 1, kind: .contextSnapshot, bundleID: "com.example.NotProtected",
+                value: "token AKIAQQQQWWWWEEEERRRR end"))
+        await store.close()
+
+        let result = try CLIRunner.run(["privacy"], env: ["OPENRHYME_DATA_DIR": dir.path])
+        #expect(result.status == 0, "\(result.stderr)")
+        #expect(result.stdout.contains("stored rows a protect rule matches: 0"))
+        #expect(result.stdout.contains("a rule-match count ONLY"))
+        #expect(result.stdout.contains("even if it contains a secret"))
+        #expect(result.stdout.contains("openrhyme events --since 7d --ignore-privacy"))
+        // The old phrasing must be gone, not merely supplemented.
+        #expect(!result.stdout.contains("stored rows matching current rules:"))
     }
 
     @Test func disabledStateIsUnmistakableNotJustTheWordDisabled() async throws {
@@ -196,9 +222,13 @@ import Testing
         #expect(humanResult.status == 0, "\(humanResult.stderr)")
         // Labelled plainly as hypothetical, not presented as "stored rows matching current
         // rules" — that phrasing is reserved for when the rules are actually in force.
-        #expect(humanResult.stdout.contains("rows these rules would match if enabled: 2"))
-        #expect(!humanResult.stdout.contains("stored rows matching current rules:"))
+        #expect(
+            humanResult.stdout.contains(
+                "stored rows a protect rule would match if enabled: 2"))
+        #expect(!humanResult.stdout.contains("stored rows a protect rule matches:"))
         #expect(humanResult.stdout.contains("hypothetical"))
+        // The rule-match caveat rides on the number in this state too.
+        #expect(humanResult.stdout.contains("a rule-match count ONLY"))
     }
 
     @Test func disabledStateDoesNotPresentPurgeApplyRulesAsAnActionableStep() async throws {

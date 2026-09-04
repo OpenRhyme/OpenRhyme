@@ -131,4 +131,37 @@ import Testing
         // Bundle-id rules don't need a window to evaluate, so they don't factor into this guard.
         #expect(PrivacyPolicy(settings: settings).protectionForWindowlessContext() == nil)
     }
+
+    // MARK: - I6 (whole-branch review): the configured rules and the windowless guard are one
+    // verdict, evaluated in one place. `AXClient.focusedContext` and
+    // `AXClient.focusedElementInspection` had hand-copied the pair; only the windowless half had
+    // been factored out, which is how they diverged in the first place.
+
+    @Test func focusedContextVerdictAppliesTheConfiguredRulesFirst() {
+        #expect(
+            policy.evaluateFocusedContext(
+                bundleID: "com.1password.1password", window: WindowInfo(title: "Vault"))
+                == .protected(rule: "bundle-id"))
+        #expect(
+            policy.evaluateFocusedContext(
+                bundleID: "com.google.Chrome",
+                window: WindowInfo(url: "https://bao.example.net/ui/vault/secrets/list"))
+                == .protected(rule: "url"))
+    }
+
+    @Test func focusedContextVerdictFallsBackToTheWindowlessGuard() {
+        #expect(
+            policy.evaluateFocusedContext(bundleID: "com.apple.TextEdit", window: nil)
+                == .protected(rule: "unverifiable-context"))
+        #expect(
+            PrivacyPolicy.disabled.evaluateFocusedContext(
+                bundleID: "com.apple.TextEdit", window: nil) == .open)
+    }
+
+    @Test func focusedContextVerdictIsOpenForAnOrdinaryWindow() {
+        #expect(
+            policy.evaluateFocusedContext(
+                bundleID: "com.apple.TextEdit",
+                window: WindowInfo(title: "notes", document: "/tmp/notes.md")) == .open)
+    }
 }

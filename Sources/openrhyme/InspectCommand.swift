@@ -72,8 +72,14 @@ struct InspectCommand: AsyncParsableCommand {
                         app: app, window: nil, element: nil, attributeNames: [], tree: nil,
                         protectedBy: protectedBy)
                 }
+                // I7: the protect rules were only ever half the policy. An open context still
+                // goes through the credential-field guard and secret redaction, exactly as the
+                // daemon's own capture path does.
+                let visible = Self.applyPolicy(
+                    element: context.element, window: context.window, policy: policy,
+                    maxValueBytes: config.capture.maxValueBytes)
                 return Inspection(
-                    app: app, window: context.window, element: context.element,
+                    app: app, window: visible.window, element: visible.element,
                     attributeNames: inspection.attributeNames, tree: inspection.tree,
                     protectedBy: nil)
             }
@@ -91,6 +97,33 @@ struct InspectCommand: AsyncParsableCommand {
         if let inspection { return inspection }
         if case .protected(let rule) = context { return rule }
         return nil
+    }
+
+    /// Whole-branch review I7: `inspect` applied the protect rules and stopped there — it
+    /// returned `context.element` verbatim and never called `Redaction.apply`, so a
+    /// credential-named field the daemon refuses to read, and a secret the daemon redacts before
+    /// storing, both printed in full. The README says `inspect` "honours the same policy as
+    /// capture"; this is the rest of that policy: the credential-field guard and the
+    /// `AXSecureTextField` guard on `value`/`selected_text` (via `Redaction.apply`, the same call
+    /// `HeartbeatDiff` makes), plus secret redaction over the element title and the window's
+    /// title/document/URL — the columns `EventRedaction` covers on a stored row.
+    ///
+    /// Pure, so it is pinnable without live AX. With `--ignore-privacy` the policy is
+    /// `.disabled` and every step here is a pass-through, except the unconditional secure-field
+    /// guard inside `Redaction.apply`, which `--ignore-privacy` has never overridden.
+    static func applyPolicy(
+        element: ElementInfo?, window: WindowInfo?, policy: PrivacyPolicy, maxValueBytes: Int
+    ) -> (element: ElementInfo?, window: WindowInfo?) {
+        var visibleWindow = window
+        visibleWindow?.title = EventRedaction.redactText(window?.title, policy: policy)
+        visibleWindow?.document = EventRedaction.redactText(window?.document, policy: policy)
+        visibleWindow?.url = EventRedaction.redactText(window?.url, policy: policy)
+        guard var visibleElement = element else { return (nil, visibleWindow) }
+        let redacted = Redaction.apply(element, maxValueBytes: maxValueBytes, policy: policy)
+        visibleElement.value = redacted.value
+        visibleElement.selectedText = redacted.selectedText
+        visibleElement.title = EventRedaction.redactText(visibleElement.title, policy: policy)
+        return (visibleElement, visibleWindow)
     }
 
     static func human(_ inspection: Inspection) -> String {

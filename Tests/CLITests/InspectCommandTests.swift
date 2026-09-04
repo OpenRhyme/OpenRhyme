@@ -82,6 +82,57 @@ import Testing
         #expect(InspectCommand.protectedBy(context: .open, inspection: nil) == nil)
     }
 
+    // MARK: - I7 (whole-branch review): the protect rules were only half the policy. `inspect`
+    // returned `context.element` verbatim and never called `Redaction.apply`, so on an *open*
+    // context a credential-named field and a pasted key both printed in full — while the README
+    // said `inspect` "honours the same policy as capture".
+
+    @Test func inspectAppliesTheCredentialFieldGuardOnAnOpenContext() {
+        let element = ElementInfo(
+            role: "AXTextField", identifier: "current-password", value: "hunter2",
+            selectedText: "hunter2")
+        let out = InspectCommand.applyPolicy(
+            element: element, window: WindowInfo(title: "Login"),
+            policy: PrivacyPolicy(settings: PrivacySettings()), maxValueBytes: 1000)
+        #expect(out.element?.value == nil)
+        #expect(out.element?.selectedText == nil)
+        #expect(out.element?.identifier == "current-password")
+    }
+
+    @Test func inspectRedactsSecretsInTheElementAndTheWindowFields() {
+        let key = "AKIAQQQQWWWWEEEERRRR"
+        let element = ElementInfo(
+            role: "AXTextArea", title: "label \(key)", value: "body \(key)",
+            selectedText: "sel \(key)")
+        let window = WindowInfo(
+            title: "Report \(key)", document: "/tmp/\(key).txt",
+            url: "https://ex.com/?token=\(key)")
+        let out = InspectCommand.applyPolicy(
+            element: element, window: window, policy: PrivacyPolicy(settings: PrivacySettings()),
+            maxValueBytes: 1000)
+        #expect(out.element?.value == "body [redacted:aws-key]")
+        #expect(out.element?.selectedText == "sel [redacted:aws-key]")
+        #expect(out.element?.title == "label [redacted:aws-key]")
+        #expect(out.window?.title == "Report [redacted:aws-key]")
+        #expect(out.window?.document == "/tmp/[redacted:aws-key].txt")
+        #expect(out.window?.url == "https://ex.com/?token=[redacted:aws-key]")
+    }
+
+    @Test func ignorePrivacyPassesTextThroughButNeverLiftsTheSecureFieldGuard() {
+        let key = "AKIAQQQQWWWWEEEERRRR"
+        let plain = InspectCommand.applyPolicy(
+            element: ElementInfo(role: "AXTextArea", value: "body \(key)"),
+            window: WindowInfo(title: "Report \(key)"), policy: .disabled, maxValueBytes: 1000)
+        #expect(plain.element?.value == "body \(key)")
+        #expect(plain.window?.title == "Report \(key)")
+
+        let secure = InspectCommand.applyPolicy(
+            element: ElementInfo(
+                role: "AXTextField", subrole: "AXSecureTextField", value: "hunter2"),
+            window: nil, policy: .disabled, maxValueBytes: 1000)
+        #expect(secure.element?.value == nil)
+    }
+
     @Test func inspectionRuleWinsWhenBothSidesAgreeOnBeingProtected() {
         // Both sides protected is the common case; either rule name is acceptable to report,
         // but the result must never be nil.

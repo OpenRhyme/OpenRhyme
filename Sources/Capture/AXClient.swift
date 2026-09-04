@@ -48,23 +48,13 @@ public final class AXClient: AXReading {
         of app: AppInfo, reusing cache: ContentCache?, policy: PrivacyPolicy
     ) throws -> FocusedContext {
         let application = AXUIElementCreateApplication(app.pid)
-        var window: WindowInfo?
-        if let focusedWindow = try element(application, kAXFocusedWindowAttribute) {
-            window = try readWindow(focusedWindow)
-        }
-        if case .protected(let rule) = policy.evaluateContext(
-            bundleID: app.bundleID, windowTitle: window?.title, document: window?.document,
-            url: window?.url)
+        let window = try focusedWindowInfo(of: application)
+        if case .protected(let rule) = policy.evaluateFocusedContext(
+            bundleID: app.bundleID, window: window)
         {
             // Privacy §4: return before any content read — the text never enters the process.
             return FocusedContext(
                 app: app, window: nil, element: nil, protection: .protected(rule: rule))
-        }
-        // Privacy: with no focused window we cannot evaluate the URL/document/title rules at all,
-        // so a protected page reachable through the focused element alone would be harvested.
-        // Fail closed instead — the frontmost app almost always has a focused window in real use.
-        if window == nil, let protection = policy.protectionForWindowlessContext() {
-            return FocusedContext(app: app, window: nil, element: nil, protection: protection)
         }
         var element: ElementInfo?
         if let focused = try self.element(application, kAXFocusedUIElementAttribute) {
@@ -98,6 +88,17 @@ public final class AXClient: AXReading {
             }
         }
         return FocusedContext(app: app, window: window, element: element)
+    }
+
+    /// The focused window of an application element, or `nil` when it has none. Shared by
+    /// `focusedContext` and `focusedElementInspection` (whole-branch review I6) so both feed
+    /// `PrivacyPolicy.evaluateFocusedContext` the same window — including the `nil` that arms
+    /// the windowless fail-closed guard.
+    func focusedWindowInfo(of application: AXUIElement) throws -> WindowInfo? {
+        guard let focusedWindow = try element(application, kAXFocusedWindowAttribute) else {
+            return nil
+        }
+        return try readWindow(focusedWindow)
     }
 
     /// Identity + selection only (no content ladder), for the cache-hit path.

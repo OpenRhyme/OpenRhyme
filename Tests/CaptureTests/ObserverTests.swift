@@ -424,6 +424,23 @@ import Testing
         #expect(events.last?.bundleID == "com.apple.Safari")
     }
 
+    /// Whole-branch review H2: a menu title is stored text like any other column, so it goes
+    /// through capture-time secret redaction too — a "Copy token …" item in an app the rules do
+    /// not protect must not land on disk in the clear.
+    @Test func menuSelectionTitleIsSecretRedactedAtCaptureTime() async throws {
+        let fake = FakeAXClient()
+        fake.show(safari, window: WindowInfo(title: "A"))
+        let capturer = try makeCapturer(fake: fake)
+        capturer.tick()
+        capturer.handle(
+            change: ObservedChange(
+                pid: 10, kind: .menuItemSelected, menuTitle: "Copy AKIAQQQQWWWWEEEERRRR", ts: 7))
+        let events = await drain(capturer)
+        #expect(events.last?.kind == .menuItemSelected)
+        #expect(events.last?.elementTitle == "Copy [redacted:aws-key]")
+        #expect(events.last?.extra?["redacted"] == .array([.string("aws-key")]))
+    }
+
     /// The read is taken only when a rule that needs a window is actually configured, so the
     /// original "menu selections are free" property survives wherever the policy cannot object.
     @Test func menuSelectionSkipsThePolicyReadWhenNoWindowRuleCanApply() async throws {

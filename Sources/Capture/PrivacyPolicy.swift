@@ -79,6 +79,24 @@ public struct PrivacyPolicy: Sendable, Equatable {
         return .protected(rule: "unverifiable-context")
     }
 
+    /// The complete window-level verdict for a focused context: the configured rules, plus the
+    /// windowless fail-closed guard when there is no focused window to evaluate them against.
+    ///
+    /// Whole-branch review I6: every AX entry point that reads a focused context has to apply
+    /// *both* halves in the same order, and hand-copying that pair into each one is exactly how
+    /// `focusedContext` and `focusedElementInspection` diverged in privacy fix round 2 — one kept
+    /// reading content the other had already refused. `protectionForWindowlessContext` was
+    /// factored out then; this is the rest of it, so there is one source of truth for "may this
+    /// context be read at all".
+    public func evaluateFocusedContext(bundleID: String?, window: WindowInfo?) -> Protection {
+        let verdict = evaluateContext(
+            bundleID: bundleID, windowTitle: window?.title, document: window?.document,
+            url: window?.url)
+        if case .protected = verdict { return verdict }
+        guard window == nil, let windowless = protectionForWindowlessContext() else { return .open }
+        return windowless
+    }
+
     /// A field whose name says credential, even when the app never marked it secure.
     public func isCredentialField(identifier: String?, title: String?) -> Bool {
         guard enabled else { return false }

@@ -19,6 +19,12 @@ struct EventsCommand: AsyncParsableCommand {
         help: "Truncate value/selected_text to this many characters (0 = full, the default)."
     ) var maxValueChars: Int = 0
     @Flag(name: .long, help: "Emit a JSON envelope.") var json = false
+    @Flag(
+        name: .long,
+        help:
+            "Return stored text unredacted, so you can audit what the store actually holds (prints a warning; reads only)."
+    )
+    var ignorePrivacy = false
 
     struct Result: Encodable {
         let events: [RawEvent]
@@ -44,26 +50,19 @@ struct EventsCommand: AsyncParsableCommand {
     }
 
     /// Spec privacy §4: redaction is re-applied on the way out, so a rule added today also
-    /// protects rows captured before it existed. Idempotent — an already-redacted row is
-    /// unchanged. Covers the six text columns — `value`, `selected_text`, `window_title`,
-    /// `url`, `document`, `element_title` — not just `value`/`selected_text` (privacy fix round
-    /// 1, J8): a credential is just as real leaked in a URL query string
-    /// (`?token=AKIA…`) or a window title as it is in `value`.
-    ///
-    /// Also covers `extra.previousTitle` (privacy fix round 3, S3): `HeartbeatDiff` copies the
-    /// prior window title into it verbatim on a `titleChanged` row, so a secret redacted out of
-    /// `window_title` on one row was otherwise still sitting in plain text in `extra` on the
-    /// very next one. The rest of `extra` is deliberately left alone — it carries hashes,
-    /// counts, booleans, and rule/enum names (`fingerprint`, `valueHash`, `textSource`,
-    /// `protectedBy`, `redacted`, `reason`, `input`, `length`, `truncated`, …), none of which is
-    /// user-visible captured text, and redacting one would corrupt it rather than protect
-    /// anything. `extra.fingerprint` and `extra.valueHash` in particular must survive
-    /// byte-identical: dedup keys on them today, and the planned compaction layer keys on them
-    /// too.
+    /// protects rows captured before it existed. The column list lives in
+    /// `EventRedaction.apply`, which the capture path calls too (whole-branch review H2) — the
+    /// two used to keep their own lists, and capture's was four columns shorter. Idempotent, so
+    /// re-running it here over a row capture already cleaned changes nothing.
     ///
     /// Only ever changes what is *returned*: this never writes back to the store, so
     /// capture-time artifacts (`extra.fingerprint`, `extra.valueHash`, dedup) are computed from
     /// the original, unredacted text and are unaffected by what a later read redacts.
+    ///
+    /// Pass `PrivacyPolicy.disabled` to return stored text as-is — what `--ignore-privacy` does
+    /// on `events`/`export` (whole-branch review H3). The default must stay redacted: the MCP
+    /// server reads through `events`, so an agent must never get raw text without the user
+    /// explicitly asking for it.
     ///
     /// When `maxValueChars > 0` actually cuts `value` or `selected_text`, `extra.valueTruncated`
     /// is set `true` (privacy fix round 1, J12) so a caller can tell a value was cut rather than
@@ -76,15 +75,7 @@ struct EventsCommand: AsyncParsableCommand {
     {
         events.map { event in
             var copy = event
-            if policy.enabled {
-                copy.value = redact(copy.value, policy: policy)
-                copy.selectedText = redact(copy.selectedText, policy: policy)
-                copy.windowTitle = redact(copy.windowTitle, policy: policy)
-                copy.url = redact(copy.url, policy: policy)
-                copy.document = redact(copy.document, policy: policy)
-                copy.elementTitle = redact(copy.elementTitle, policy: policy)
-                copy.extra = redactExtra(copy.extra, policy: policy)
-            }
+            EventRedaction.apply(to: &copy, policy: policy)
             if maxValueChars > 0 {
                 var truncated = false
                 if let value = copy.value, value.count > maxValueChars {
@@ -105,23 +96,6 @@ struct EventsCommand: AsyncParsableCommand {
         }
     }
 
-    private static func redact(_ text: String?, policy: PrivacyPolicy) -> String? {
-        text.map { SecretRedactor.redact($0, entropyEnabled: policy.entropyRedaction).text }
-    }
-
-    /// The only `extra` key redacted is `previousTitle` — the one place `extra` carries
-    /// verbatim user-visible text (see `project`'s doc comment for why every other key is left
-    /// alone).
-    private static func redactExtra(
-        _ extra: [String: JSONValue]?, policy: PrivacyPolicy
-    ) -> [String: JSONValue]? {
-        guard var extra, let previousTitle = extra["previousTitle"]?.stringValue else {
-            return extra
-        }
-        extra["previousTitle"] = .string(redact(previousTitle, policy: policy) ?? previousTitle)
-        return extra
-    }
-
     func run() async throws {
         try await runJSON(json: json, human: Self.humanLines) {
             let query = EventQuery(
@@ -130,7 +104,13 @@ struct EventsCommand: AsyncParsableCommand {
                 kinds: try Self.parseKinds(kind), bundleID: app, limit: limit)
             let paths = Paths.resolve()
             let config = try Config.load(from: paths.configURL)
-            let policy = PrivacyPolicy(settings: config.privacy)
+            // H3: the owner must be able to audit their own history — to find out whether
+            // something sensitive was captured at all, and to confirm a purge worked. Opt-in
+            // only, warned on stderr so a `--json` stdout stays parseable, and named after the
+            // precedent `inspect` already set.
+            let policy =
+                ignorePrivacy ? PrivacyPolicy.disabled : PrivacyPolicy(settings: config.privacy)
+            if ignorePrivacy { Output.stderr(Self.ignorePrivacyWarning) }
             let store = try EventStore(url: paths.databaseURL, readOnly: true)
             let events = try await store.query(query)
             await store.close()
@@ -138,6 +118,12 @@ struct EventsCommand: AsyncParsableCommand {
             return Result(events: projected, count: projected.count)
         }
     }
+
+    /// Shared with `export`, so both commands warn in exactly the same words. Goes to stderr,
+    /// never stdout, so it can never end up inside a JSON envelope or a JSONL export file.
+    static let ignorePrivacyWarning =
+        "warning: --ignore-privacy returns stored text unredacted — any secret in the store is "
+        + "printed in the clear"
 
     static func humanLines(_ result: Result) -> String {
         let formatter = ISO8601DateFormatter()

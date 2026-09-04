@@ -173,6 +173,18 @@ struct PrivacyCommand: AsyncParsableCommand {
         return count
     }
 
+    /// Whole-branch review, honesty defect: the old line read "stored rows matching current
+    /// rules: 0", and a worried user reads a `0` there as "nothing sensitive is stored". It never
+    /// meant that. It counts rows a *protect rule* matches — a row that merely contains a secret
+    /// matches no rule and is not counted, and `purge --apply-rules` will not remove it either.
+    /// The caveat rides on the number itself, in both the enabled and disabled wordings, so the
+    /// count can never be quoted or skimmed without it.
+    static let matchCountCaveat =
+        " — a rule-match count ONLY. This is not a measure of how much sensitive data is stored: "
+        + "a row no protect rule matches is not counted here even if it contains a secret, and "
+        + "`purge --apply-rules` would not remove it either. To see what is actually in the "
+        + "store, read it unredacted with: openrhyme events --since 7d --ignore-privacy"
+
     static func human(_ result: Result) -> String {
         var lines: [String] = []
         // The single word "disabled" reads exactly like "enabled" at a skim — this is the one
@@ -235,7 +247,9 @@ struct PrivacyCommand: AsyncParsableCommand {
         // safe next step: `purge --apply-rules` matches nothing while the policy is off, so it
         // would report success (`deleted: 0`) while every row counted here stays untouched.
         if result.enabled {
-            lines.append("stored rows matching current rules: \(result.storedRowsMatchingRules)")
+            lines.append(
+                "stored rows a protect rule matches: \(result.storedRowsMatchingRules)"
+                    + Self.matchCountCaveat)
             if result.storedRowsMatchingRules > 0 {
                 lines.append(
                     "\(result.storedRowsMatchingRules) stored rows match the current rules; "
@@ -243,7 +257,8 @@ struct PrivacyCommand: AsyncParsableCommand {
             }
         } else {
             lines.append(
-                "rows these rules would match if enabled: \(result.storedRowsMatchingRules)")
+                "stored rows a protect rule would match if enabled: "
+                    + "\(result.storedRowsMatchingRules)" + Self.matchCountCaveat)
             lines.append(
                 "privacy is OFF, so this is a hypothetical count — nothing is being matched "
                     + "right now, and `openrhyme purge --apply-rules` would remove nothing while "

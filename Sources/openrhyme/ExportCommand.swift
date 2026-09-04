@@ -11,6 +11,12 @@ struct ExportCommand: AsyncParsableCommand {
     @Option(name: .long, help: "Start time: 2h, 30m, unix seconds, or ISO-8601.") var since: String
     @Option(name: .long, help: "End time (same grammar).") var until: String?
     @Option(name: .long, help: "Write to this file instead of stdout.") var out: String?
+    @Flag(
+        name: .long,
+        help:
+            "Export stored text unredacted, so you can audit what the store actually holds (prints a warning; reads only)."
+    )
+    var ignorePrivacy = false
 
     func run() async throws {
         do {
@@ -18,7 +24,12 @@ struct ExportCommand: AsyncParsableCommand {
             let untilTS = try until.map { try TimeSpec.parse($0) }
             let paths = Paths.resolve()
             let config = try Config.load(from: paths.configURL)
-            let policy = PrivacyPolicy(settings: config.privacy)
+            // H3: same opt-in escape hatch as `events`, same name, same warning — without it the
+            // owner cannot verify what a purge actually removed. An unredacted `--out` file is
+            // still created `0600` below, but it is a plaintext copy of the store: see Limits.
+            let policy =
+                ignorePrivacy ? PrivacyPolicy.disabled : PrivacyPolicy(settings: config.privacy)
+            if ignorePrivacy { Output.stderr(EventsCommand.ignorePrivacyWarning) }
             let store = try EventStore(url: paths.databaseURL, readOnly: true)
             let handle: FileHandle
             if let out {
