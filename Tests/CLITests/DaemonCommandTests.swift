@@ -1170,4 +1170,33 @@ private final class TestBox<Value>: @unchecked Sendable {
                     ts: 0, kind: .daemonStarted,
                     extra: ["privacy": .object(["retentionDays": .number(1.5)])])) == 0)
     }
+
+    /// Privacy fix round 2, S5: `daemon.started` is one of `auditTrailKinds`, exempt from the
+    /// retention sweep, so it accumulates for the life of the store — `RetentionReviewGate`'s
+    /// seed must therefore be the row with the newest `ts`, not the row that happens to have
+    /// been appended last (they are made to disagree here, as a clock correction between two
+    /// starts would produce) and not any row of another kind, however new.
+    @Test func mostRecentDaemonStartedReturnsTheNewestRowByTsNotInsertionOrder() async throws {
+        let dir = try CLIRunner.tempDataDir()
+        let store = try EventStore(url: dir.appendingPathComponent("events.sqlite"))
+        try await store.append(
+            RawEvent(
+                ts: 100, kind: .daemonStarted,
+                extra: ["privacy": .object(["retentionDays": .number(1)])]))
+        try await store.append(
+            RawEvent(
+                ts: 300, kind: .daemonStarted,
+                extra: ["privacy": .object(["retentionDays": .number(30)])]))
+        try await store.append(
+            RawEvent(
+                ts: 200, kind: .daemonStarted,
+                extra: ["privacy": .object(["retentionDays": .number(7)])]))
+        // Newer than every daemon.started row, but the wrong kind — must not be picked.
+        try await store.append(RawEvent(ts: 999, kind: .daemonStopped))
+
+        let mostRecent = try await DaemonCommand.mostRecentDaemonStarted(store: store)
+        #expect(mostRecent?.ts == 300)
+        #expect(DaemonCommand.recordedRetentionDays(mostRecent) == 30)
+        await store.close()
+    }
 }

@@ -141,6 +141,22 @@ public actor EventStore {
         return rows
     }
 
+    /// The single newest row of one `kind`, or `nil` when there is none — `ORDER BY ts DESC, id
+    /// DESC LIMIT 1` directly, so the answer is exact no matter how many rows of that kind exist
+    /// (privacy fix round 3, S5). `id` breaks ties on an equal `ts`, newest insertion first.
+    ///
+    /// Unlike paging through `query` with a bounded `limit` and taking the last page's last
+    /// row — correct only up to `EventQuery.maxLimit` rows of that kind, silently wrong past
+    /// it — this scales to any row count.
+    public func mostRecentEvent(kind: EventKind) throws -> RawEvent? {
+        let statement = try db.prepare(
+            "SELECT \(Self.columns.joined(separator: ", ")) FROM events WHERE kind = ? "
+                + "ORDER BY ts DESC, id DESC LIMIT 1"
+        ).bind([.text(kind.rawValue)])
+        guard try statement.step() else { return nil }
+        return try row(statement)
+    }
+
     private func row(_ s: Statement) throws -> RawEvent {
         guard let kindRaw = s.string(2), let kind = EventKind(rawValue: kindRaw) else {
             throw DatabaseError(code: -1, message: "unknown kind in row \(s.int64(0) ?? -1)")

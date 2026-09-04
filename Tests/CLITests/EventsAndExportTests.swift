@@ -263,6 +263,47 @@ import Testing
         #expect(stored.first?.value == "token AKIAQQQQWWWWEEEERRRR end")
     }
 
+    // MARK: - S3 (privacy fix round 3): read-time redaction must also cover
+    // `extra.previousTitle` — `HeartbeatDiff` copies the prior window title into it verbatim on
+    // a `window.title_changed` row, so a secret redacted out of `window_title` on one row was
+    // otherwise still sitting in plain text right next to it, in `extra`, on that very row.
+
+    @Test func eventsAndExportRedactSecretsInExtraPreviousTitleWithoutTouchingHashes()
+        async throws
+    {
+        let dir = try CLIRunner.tempDataDir()
+        let store = try EventStore(url: dir.appendingPathComponent("events.sqlite"))
+        try await store.append(
+            RawEvent(
+                ts: 100, kind: .windowTitleChanged, bundleID: "com.apple.Safari",
+                windowTitle: "new title [redacted:aws-key]",
+                extra: [
+                    "reason": "titleChanged",
+                    "previousTitle": "prev title AKIAQQQQWWWWEEEERRRR",
+                    "fingerprint": "abc123", "valueHash": "def456",
+                ]))
+        await store.close()
+        let env = ["OPENRHYME_DATA_DIR": dir.path]
+
+        let eventsResult = try CLIRunner.run(["events", "--since", "0", "--json"], env: env)
+        #expect(eventsResult.status == 0, "\(eventsResult.stderr)")
+        let eventsRows = try #require(
+            (try CLIRunner.json(eventsResult.stdout)["data"] as? [String: Any])?["events"]
+                as? [[String: Any]])
+        let eventsExtra = try #require(eventsRows.first?["extra"] as? [String: Any])
+        #expect(eventsExtra["previousTitle"] as? String == "prev title [redacted:aws-key]")
+        #expect(eventsExtra["fingerprint"] as? String == "abc123")
+        #expect(eventsExtra["valueHash"] as? String == "def456")
+
+        let exportResult = try CLIRunner.run(["export", "--since", "0"], env: env)
+        #expect(exportResult.status == 0, "\(exportResult.stderr)")
+        #expect(
+            exportResult.stdout.contains(#""previousTitle":"prev title [redacted:aws-key]""#))
+        #expect(exportResult.stdout.contains(#""fingerprint":"abc123""#))
+        #expect(exportResult.stdout.contains(#""valueHash":"def456""#))
+        #expect(!exportResult.stdout.contains("AKIAQQQQWWWWEEEERRRR"))
+    }
+
     // MARK: - J9 (privacy fix round 1): a corrupt config.json must fail closed with a mapped
     // error, not leak a raw DecodingError as an unmapped internal_error.
 

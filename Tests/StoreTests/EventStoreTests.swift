@@ -111,6 +111,38 @@ import Testing
         #expect(try await store.lastEventTS(excludingKinds: [.daemonStarted]) == nil)
     }
 
+    /// Privacy fix round 3, S5: `mostRecentDaemonStarted` used to page `query` (bounded at
+    /// `EventQuery.maxLimit`) and take the last page's last row — correct only below that
+    /// bound, silently wrong past it. `mostRecentEvent` goes straight to `ORDER BY ts DESC, id
+    /// DESC LIMIT 1`, so it must return the row with the newest `ts`, not the one appended
+    /// last — inserted out of `ts` order here (e.g. a clock correction) so the two would
+    /// disagree if a bug picked "last appended" instead.
+    @Test func mostRecentEventReturnsTheNewestRowByTsRegardlessOfInsertionOrder() async throws {
+        let store = try EventStore(url: tempURL())
+        try await store.append(RawEvent(ts: 100, kind: .daemonStarted, bundleID: "first"))
+        try await store.append(RawEvent(ts: 300, kind: .daemonStarted, bundleID: "newest"))
+        try await store.append(RawEvent(ts: 200, kind: .daemonStarted, bundleID: "middle"))
+        // A different kind, even with the largest ts of all, must never be picked.
+        try await store.append(RawEvent(ts: 999, kind: .windowFocused, bundleID: "wrong-kind"))
+
+        let mostRecent = try await store.mostRecentEvent(kind: .daemonStarted)
+        #expect(mostRecent?.bundleID == "newest")
+        #expect(mostRecent?.ts == 300)
+    }
+
+    @Test func mostRecentEventBreaksATieOnEqualTsByTheHigherID() async throws {
+        let store = try EventStore(url: tempURL())
+        try await store.append(RawEvent(ts: 100, kind: .daemonStarted, bundleID: "older-id"))
+        try await store.append(RawEvent(ts: 100, kind: .daemonStarted, bundleID: "newer-id"))
+        #expect(try await store.mostRecentEvent(kind: .daemonStarted)?.bundleID == "newer-id")
+    }
+
+    @Test func mostRecentEventIsNilWhenNoRowOfThatKindExists() async throws {
+        let store = try EventStore(url: tempURL())
+        try await store.append(RawEvent(ts: 100, kind: .windowFocused))
+        #expect(try await store.mostRecentEvent(kind: .daemonStarted) == nil)
+    }
+
     @Test func afterIDPagingOrdersByIDSoNonMonotonicTSNeverSkipsRows() async throws {
         let store = try EventStore(url: tempURL())
         // ts values are NOT monotonic in insertion order (e.g. a backward clock

@@ -538,13 +538,17 @@ struct DaemonCommand: AsyncParsableCommand {
     }
 
     /// The most recently recorded `daemon.started` row, if any — how `RetentionReviewGate` is
-    /// seeded so it can detect a transition from retention off to on across restarts. Pages up
-    /// to `EventQuery.maxLimit` rows; in practice a daemon restarts far less than 10,000 times
-    /// over a store's lifetime, so this always sees the true most recent one.
+    /// seeded so it can detect a transition from retention off to on across restarts.
+    ///
+    /// Goes straight to `EventStore.mostRecentEvent(kind:)` (`ORDER BY ts DESC, id DESC LIMIT
+    /// 1`) rather than paging `query` and taking the last page's last row (privacy fix round 3,
+    /// S5): `daemon.started` is one of `auditTrailKinds`, exempt from the retention sweep, so it
+    /// accumulates for the life of the store — past `EventQuery.maxLimit` (10,000) restarts, a
+    /// paged `ORDER BY ts ASC LIMIT 10000` query silently returned the 10,000th-*oldest* row
+    /// instead of the newest, which fed `RetentionReviewGate` a stale posture and could re-fire
+    /// or suppress the retention-change safeguard.
     static func mostRecentDaemonStarted(store: EventStore) async throws -> RawEvent? {
-        let rows = try await store.query(
-            EventQuery(since: 0, kinds: [.daemonStarted], limit: EventQuery.maxLimit))
-        return rows.last
+        try await store.mostRecentEvent(kind: .daemonStarted)
     }
 
     /// The `retention_days` a `daemon.started` row recorded as in force at the time, or `0` for

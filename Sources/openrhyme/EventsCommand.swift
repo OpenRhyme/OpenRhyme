@@ -45,13 +45,25 @@ struct EventsCommand: AsyncParsableCommand {
 
     /// Spec privacy §4: redaction is re-applied on the way out, so a rule added today also
     /// protects rows captured before it existed. Idempotent — an already-redacted row is
-    /// unchanged. Covers every text-bearing column — `value`, `selected_text`, `window_title`,
+    /// unchanged. Covers the six text columns — `value`, `selected_text`, `window_title`,
     /// `url`, `document`, `element_title` — not just `value`/`selected_text` (privacy fix round
     /// 1, J8): a credential is just as real leaked in a URL query string
-    /// (`?token=AKIA…`) or a window title as it is in `value`. Only ever changes what is
-    /// *returned*: this never writes back to the store, so capture-time artifacts
-    /// (`extra.fingerprint`, `extra.valueHash`, dedup) are computed from the original,
-    /// unredacted text and are unaffected by what a later read redacts.
+    /// (`?token=AKIA…`) or a window title as it is in `value`.
+    ///
+    /// Also covers `extra.previousTitle` (privacy fix round 3, S3): `HeartbeatDiff` copies the
+    /// prior window title into it verbatim on a `titleChanged` row, so a secret redacted out of
+    /// `window_title` on one row was otherwise still sitting in plain text in `extra` on the
+    /// very next one. The rest of `extra` is deliberately left alone — it carries hashes,
+    /// counts, booleans, and rule/enum names (`fingerprint`, `valueHash`, `textSource`,
+    /// `protectedBy`, `redacted`, `reason`, `input`, `length`, `truncated`, …), none of which is
+    /// user-visible captured text, and redacting one would corrupt it rather than protect
+    /// anything. `extra.fingerprint` and `extra.valueHash` in particular must survive
+    /// byte-identical: dedup keys on them today, and the planned compaction layer keys on them
+    /// too.
+    ///
+    /// Only ever changes what is *returned*: this never writes back to the store, so
+    /// capture-time artifacts (`extra.fingerprint`, `extra.valueHash`, dedup) are computed from
+    /// the original, unredacted text and are unaffected by what a later read redacts.
     ///
     /// When `maxValueChars > 0` actually cuts `value` or `selected_text`, `extra.valueTruncated`
     /// is set `true` (privacy fix round 1, J12) so a caller can tell a value was cut rather than
@@ -71,6 +83,7 @@ struct EventsCommand: AsyncParsableCommand {
                 copy.url = redact(copy.url, policy: policy)
                 copy.document = redact(copy.document, policy: policy)
                 copy.elementTitle = redact(copy.elementTitle, policy: policy)
+                copy.extra = redactExtra(copy.extra, policy: policy)
             }
             if maxValueChars > 0 {
                 var truncated = false
@@ -94,6 +107,19 @@ struct EventsCommand: AsyncParsableCommand {
 
     private static func redact(_ text: String?, policy: PrivacyPolicy) -> String? {
         text.map { SecretRedactor.redact($0, entropyEnabled: policy.entropyRedaction).text }
+    }
+
+    /// The only `extra` key redacted is `previousTitle` — the one place `extra` carries
+    /// verbatim user-visible text (see `project`'s doc comment for why every other key is left
+    /// alone).
+    private static func redactExtra(
+        _ extra: [String: JSONValue]?, policy: PrivacyPolicy
+    ) -> [String: JSONValue]? {
+        guard var extra, let previousTitle = extra["previousTitle"]?.stringValue else {
+            return extra
+        }
+        extra["previousTitle"] = .string(redact(previousTitle, policy: policy) ?? previousTitle)
+        return extra
     }
 
     func run() async throws {
