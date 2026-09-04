@@ -21,6 +21,16 @@ public enum SecretRedactor {
     }
 
     /// Order matters only for readability; every rule is applied.
+    ///
+    /// Fix round 1 (2026-09-03): none of these rely on `\b` at a secret's edges any more. Swift's
+    /// `Regex` implements `\b` via Unicode word-segmentation, where `:` is a MidLetter — so
+    /// `\bAKIA…` never matches `x-api-key:AKIA…` because no boundary is seen between `y` and `A`
+    /// across the colon. This toolchain also rejects lookbehind (`(?<!…)`), confirmed with a
+    /// throwaway `try Regex` probe, so the fix is: drop the leading edge check entirely (a
+    /// leading `\b` becomes nothing) and replace a trailing `\b` with the negative lookahead
+    /// `(?![A-Za-z0-9_\-])` (supported). Slightly over-matching a token that's glued to more
+    /// identifier characters is the safe direction for a redactor; silently missing a credential
+    /// glued to a label is not.
     /// `Regex` isn't `Sendable`, but these literals are never mutated after creation — safe to
     /// share across threads for read-only matching.
     nonisolated(unsafe) static let rules: [Rule] = [
@@ -28,27 +38,36 @@ public enum SecretRedactor {
             name: "private-key-block",
             regex: try! Regex(
                 #"-----BEGIN[ A-Z]*PRIVATE KEY-----[\s\S]*?-----END[ A-Z]*PRIVATE KEY-----"#)),
-        Rule(name: "aws-key", regex: try! Regex(#"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"#)),
+        Rule(name: "aws-key", regex: try! Regex(#"(?:AKIA|ASIA)[0-9A-Z]{16}(?![A-Za-z0-9_\-])"#)),
         Rule(
             name: "github-token",
             regex: try! Regex(
-                #"\b(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{20,})\b"#)),
-        Rule(name: "stripe-key", regex: try! Regex(#"\bsk_(?:live|test)_[A-Za-z0-9]{16,}\b"#)),
-        Rule(name: "slack-token", regex: try! Regex(#"\bxox[baprs]-[A-Za-z0-9-]{10,}"#)),
-        Rule(name: "google-api-key", regex: try! Regex(#"\bAIza[0-9A-Za-z_\-]{35,}\b"#)),
-        Rule(name: "anthropic-key", regex: try! Regex(#"\bsk-ant-[A-Za-z0-9_\-]{20,}"#)),
-        Rule(name: "openai-key", regex: try! Regex(#"\bsk-(?!ant-)[A-Za-z0-9]{32,}\b"#)),
+                #"(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{20,})(?![A-Za-z0-9_\-])"#)
+        ),
+        Rule(
+            name: "stripe-key",
+            regex: try! Regex(#"sk_(?:live|test)_[A-Za-z0-9]{16,}(?![A-Za-z0-9_\-])"#)),
+        Rule(name: "slack-token", regex: try! Regex(#"xox[baprs]-[A-Za-z0-9-]{10,}"#)),
+        Rule(
+            name: "google-api-key",
+            regex: try! Regex(#"AIza[0-9A-Za-z_\-]{35}(?![A-Za-z0-9_\-])"#)),
+        Rule(name: "anthropic-key", regex: try! Regex(#"sk-ant-[A-Za-z0-9_\-]{20,}"#)),
+        Rule(
+            name: "openai-key",
+            regex: try! Regex(#"sk-(?!ant-)[A-Za-z0-9]{32,}(?![A-Za-z0-9_\-])"#)),
         Rule(
             name: "jwt",
             regex: try! Regex(
-                #"\beyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\b"#)),
+                #"eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}(?![A-Za-z0-9_\-])"#
+            )),
         Rule(
             name: "connection-string",
-            regex: try! Regex(#"\b[a-z][a-z0-9+.\-]*://[^\s:@/]+:[^\s:@/]{6,}@"#)),
+            regex: try! Regex(#"[a-z][a-z0-9+.\-]*://[^\s:@/]+:[^\s:@/]{6,}@"#)),
         Rule(
             name: "assignment-secret",
             regex: try! Regex(
-                #"(?i)\b(?:api[_\-]?key|secret|token|password|passwd)\b\s*[:=]\s*[^\s'"]{8,}"#)),
+                #"(?i)(?:api[_\-]?key|secret|token|password|passwd)(?![A-Za-z0-9_])"#
+                    + #"['"]?\s*[:=]\s*(?:"[^"]{8,}"|'[^']{8,}'|[^\s'"\[\]]{8,})"#)),
     ]
 
     /// A run long enough and mixed enough to be a credential rather than prose or a path.

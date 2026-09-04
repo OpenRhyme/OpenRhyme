@@ -13,7 +13,7 @@ import Testing
             ("ghp_aaaabbbbccccddddeeeeffffgggghhhh1111", "github-token"),
             ("sk_live_" + "aaaabbbbccccddddeeeeffff", "stripe-key"),
             ("xoxb-" + "1111111111-2222222222-aaaabbbbccccdddd", "slack-token"),
-            ("AIzaSyAAAABBBBCCCCDDDDEEEEFFFFGGGGHHHHIII", "google-api-key"),
+            ("AIzaSyAAAABBBBCCCCDDDDEEEEFFFFGGGGHHHHI", "google-api-key"),
             ("sk-ant-api03-aaaabbbbccccddddeeeeffffgggghhhh", "anthropic-key"),
         ]
         for (secret, rule) in cases {
@@ -92,5 +92,41 @@ import Testing
     @Test func emptyAndShortInputsAreSafe() {
         #expect(redact("") == RedactionResult(text: "", rules: []))
         #expect(redact("hi").rules.isEmpty)
+    }
+
+    @Test func secretsAreFoundWhenGluedToALabelByAColon() {
+        let cases: [(String, String)] = [
+            ("x-api-key:AKIAQQQQWWWWEEEERRRR", "aws-key"),
+            (
+                "Authorization:eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.aaaabbbbccccddddeeee",
+                "jwt"
+            ),
+            ("id:ghp_aaaabbbbccccddddeeeeffffgggghhhh1111", "github-token"),
+            ("key:sk_live_" + "aaaabbbbccccddddeeeeffff", "stripe-key"),
+        ]
+        for (text, rule) in cases {
+            let result = SecretRedactor.redact(text, entropyEnabled: true)
+            #expect(result.rules.contains(rule), "\(rule) missed in: \(text)")
+            #expect(result.text.contains("[redacted:\(rule)]"), "\(rule)")
+        }
+    }
+
+    @Test func quotedAssignmentValuesAreRedacted() {
+        for text in [
+            #"password="hunter2hunter2""#, "password='hunter2hunter2'",
+            #"{"api_key": "aaaabbbbccccdddd"}"#,
+        ] {
+            let result = SecretRedactor.redact(text, entropyEnabled: false)
+            #expect(result.rules.contains("assignment-secret"), "missed: \(text)")
+            #expect(!result.text.contains("hunter2hunter2"), "leaked: \(text)")
+            #expect(!result.text.contains("aaaabbbbccccdddd"), "leaked: \(text)")
+        }
+    }
+
+    @Test func anEarlierRulesMarkerIsNotSwallowedByALaterRule() {
+        let result = SecretRedactor.redact(
+            "token: ghp_aaaabbbbccccddddeeeeffffgggghhhh1111,", entropyEnabled: false)
+        #expect(result.rules == ["github-token"])
+        #expect(result.text == "token: [redacted:github-token],")
     }
 }
