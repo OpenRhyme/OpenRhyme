@@ -358,6 +358,21 @@ struct PurgeCommand: AsyncParsableCommand {
             let config = try Config.load(from: paths.configURL)
             let policy = PrivacyPolicy(settings: config.privacy)
 
+            // Privacy fix round 3 (H3): with the policy disabled, `evaluateContext` returns
+            // `.open` unconditionally, so `--apply-rules` structurally matches nothing — a
+            // silent, guaranteed no-op that reports success (`deleted: 0`) exactly like an
+            // honestly-empty selection would. Warn rather than let that read as "nothing
+            // matched the rules" when what actually happened is "the rules were never
+            // evaluated". Not an error (nothing failed; the exit code is unchanged) — just
+            // stated plainly so it can't be mistaken for a real, safety-confirming zero.
+            if applyRules, !policy.enabled {
+                Output.stderr(
+                    "warning: privacy is disabled — --apply-rules has no protect rules to match "
+                        + "against, so nothing will be selected by it; set \"enabled\": true "
+                        + "under \"privacy\" in config.json first if you meant to remove "
+                        + "rule-matched rows (check the real count with `openrhyme privacy`)")
+            }
+
             // Spec privacy §5.7: the one operation that removes sensitive data on demand must
             // never be gated behind "stop your daemon first" — so a live daemon only earns a
             // warning, never a refusal.

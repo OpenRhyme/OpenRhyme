@@ -32,6 +32,13 @@ struct PrivacyCommand: AsyncParsableCommand {
         /// context to evaluate at all (Accessibility not trusted, or no app is frontmost) — never
         /// a fabricated "open" for those cases.
         let frontmostVerdict: String?
+        /// How many stored rows the *configured* rules match, evaluated as if `enabled` were
+        /// `true` regardless of its actual value (privacy fix round 3, H1). If this were instead
+        /// computed under the real, possibly-disabled policy, a disabled policy would always
+        /// report `0` here — read by a worried user as "nothing sensitive is stored", when it
+        /// actually means "not evaluated": re-enabling could match everything counted here. This
+        /// way the field means the same thing in both states — "how many rows match these rule
+        /// definitions" — and `enabled` alone tells you whether that's real or hypothetical.
         let storedRowsMatchingRules: Int
 
         // Top-level CLI `--json` output is snake_case (see `status`/`events`/`apps`), unlike the
@@ -60,8 +67,12 @@ struct PrivacyCommand: AsyncParsableCommand {
             let policy = PrivacyPolicy(settings: config.privacy)
 
             let (frontmostApp, frontmostVerdict) = await Self.frontmostVerdict(policy: policy)
+            // H1: always count against the rules as configured, not the real (possibly
+            // disabled) policy — see the doc comment on `Result.storedRowsMatchingRules`.
+            var countingPolicy = policy
+            countingPolicy.enabled = true
             let storedRowsMatchingRules = try await Self.countProtectedRows(
-                databaseURL: paths.databaseURL, policy: policy)
+                databaseURL: paths.databaseURL, policy: countingPolicy)
 
             return Result(
                 enabled: policy.enabled,
@@ -147,11 +158,16 @@ struct PrivacyCommand: AsyncParsableCommand {
         lines.append("data dir: \(result.dataDir)")
         lines.append("db path:  \(result.dbPath)")
         // Unconditional, not just when something already matches: the one thing a first-time
-        // reader must learn before trusting this report at all.
+        // reader must learn before trusting this report at all. Deliberately does NOT name
+        // `purge --apply-rules` here (H2, privacy fix round 3): that command is only a safe,
+        // actionable instruction while privacy is enabled — printing it unconditionally, next to
+        // a disabled-state hypothetical count, would tell a worried user to run a command that
+        // silently matches nothing and reports success, while every one of their sensitive rows
+        // stays exactly where it was. The state-specific command (or its disabled-state caveat)
+        // is given below, next to the count it actually applies to.
         lines.append(
             "note: protect rules only change what gets captured from now on — they never "
-                + "remove or alter anything already stored; use `openrhyme purge --apply-rules "
-                + "--yes` to remove existing matches.")
+                + "remove or alter anything already stored.")
         if !result.enabled {
             lines.append("configured rules (listed for reference; inactive while disabled):")
         }
@@ -177,11 +193,26 @@ struct PrivacyCommand: AsyncParsableCommand {
             lines.append(
                 "frontmost: - (not available: Accessibility not trusted, or no app is frontmost)")
         }
-        lines.append("stored rows matching current rules: \(result.storedRowsMatchingRules)")
-        if result.storedRowsMatchingRules > 0 {
+        // H1/H2 (privacy fix round 3): while disabled, the count is hypothetical (computed as
+        // if enabled — see `Result.storedRowsMatchingRules`) and the removal command is not a
+        // safe next step: `purge --apply-rules` matches nothing while the policy is off, so it
+        // would report success (`deleted: 0`) while every row counted here stays untouched.
+        if result.enabled {
+            lines.append("stored rows matching current rules: \(result.storedRowsMatchingRules)")
+            if result.storedRowsMatchingRules > 0 {
+                lines.append(
+                    "\(result.storedRowsMatchingRules) stored rows match the current rules; "
+                        + "remove them with: openrhyme purge --apply-rules --yes")
+            }
+        } else {
             lines.append(
-                "\(result.storedRowsMatchingRules) stored rows match the current rules; remove "
-                    + "them with: openrhyme purge --apply-rules --yes")
+                "rows these rules would match if enabled: \(result.storedRowsMatchingRules)")
+            lines.append(
+                "privacy is OFF, so this is a hypothetical count — nothing is being matched "
+                    + "right now, and `openrhyme purge --apply-rules` would remove nothing while "
+                    + "it stays off. Enable privacy first (set \"enabled\": true under "
+                    + "\"privacy\" in config.json), then re-run `openrhyme privacy` to confirm "
+                    + "the real count before purging.")
         }
         return lines.joined(separator: "\n")
     }

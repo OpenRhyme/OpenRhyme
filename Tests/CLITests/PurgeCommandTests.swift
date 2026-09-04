@@ -466,6 +466,60 @@ import Testing
         #expect(remaining.map(\.bundleID) == ["com.google.Chrome"])
     }
 
+    // H3 (privacy fix round 3): with the policy disabled, `PrivacyPolicy.evaluateContext`
+    // returns `.open` unconditionally, so `--apply-rules` structurally matches nothing — a
+    // silent, guaranteed no-op that would otherwise report success (`deleted: 0`) exactly like
+    // an honestly-empty selection. Anyone running `purge --apply-rules` directly (not through
+    // `openrhyme privacy`) must be warned rather than shown a clean, misleadingly reassuring
+    // zero.
+    @Test func applyRulesWithPrivacyDisabledWarnsOnStderrButDoesNotFail() async throws {
+        let dir = try CLIRunner.tempDataDir()
+        let store = try EventStore(url: dir.appendingPathComponent("events.sqlite"))
+        // Would match under the default rules (bundle-id) if privacy were enabled.
+        try await store.append(
+            RawEvent(ts: 1, kind: .contextSnapshot, bundleID: "com.1password.1password"))
+        await store.close()
+        var settings = PrivacySettings()
+        settings.enabled = false
+        try Config(privacy: settings).save(to: dir.appendingPathComponent("config.json"))
+        let env = ["OPENRHYME_DATA_DIR": dir.path]
+
+        let result = try CLIRunner.run(
+            ["purge", "--since", "0", "--apply-rules", "--yes", "--json"], env: env)
+        // Not an error: nothing failed, the selection is honestly empty given the policy is
+        // off — the exit code and JSON shape are unchanged, only stderr gains a warning.
+        #expect(result.status == 0, "\(result.stderr)")
+        #expect(
+            result.stderr.contains("warning: privacy is disabled"),
+            "expected the disabled-policy warning on stderr, got: \(result.stderr)")
+        #expect(result.stderr.contains("--apply-rules"))
+        let data = try CLIRunner.json(result.stdout)["data"] as? [String: Any]
+        #expect(data?["matched"] as? Int == 0)
+        #expect(data?["deleted"] as? Int == 0)
+
+        // The row is still there — the point of the warning.
+        let after = try EventStore(
+            url: dir.appendingPathComponent("events.sqlite"), readOnly: true)
+        #expect(try await after.count() == 1)
+        await after.close()
+    }
+
+    @Test func applyRulesWithPrivacyEnabledPrintsNoDisabledWarning() async throws {
+        let dir = try CLIRunner.tempDataDir()
+        let store = try EventStore(url: dir.appendingPathComponent("events.sqlite"))
+        try await store.append(
+            RawEvent(ts: 1, kind: .contextSnapshot, bundleID: "com.1password.1password"))
+        await store.close()
+        let env = ["OPENRHYME_DATA_DIR": dir.path]
+
+        let result = try CLIRunner.run(
+            ["purge", "--since", "0", "--apply-rules", "--dry-run", "--json"], env: env)
+        #expect(result.status == 0, "\(result.stderr)")
+        #expect(!result.stderr.contains("privacy is disabled"))
+        let data = try CLIRunner.json(result.stdout)["data"] as? [String: Any]
+        #expect(data?["matched"] as? Int == 1)
+    }
+
     @Test func noFiltersAndNoAllIsAUsageErrorNotAnImplicitPurgeEverything() async throws {
         let (_, env) = try await seeded()
         let result = try CLIRunner.run(["purge", "--yes", "--json"], env: env)

@@ -68,14 +68,15 @@ import Testing
         let result = try CLIRunner.run(["privacy"], env: ["OPENRHYME_DATA_DIR": dir.path])
         #expect(result.status == 0, "\(result.stderr)")
         #expect(result.stdout.contains("stored rows matching current rules: 0"))
-        // The per-match removal sentence is conditional...
+        // The per-match removal sentence is conditional on a nonzero count, in either state...
         #expect(
             !result.stdout.contains(
                 "stored rows match the current rules; remove them with: openrhyme purge"))
-        // ...but G3's unconditional "rules are forward-looking only" note must always be there,
-        // match count aside — it's the one principle a first-time reader must learn regardless.
+        // ...but the unconditional "rules are forward-looking only" principle must always be
+        // there, match count aside. H2 (privacy fix round 3): it deliberately no longer names
+        // the specific `purge --apply-rules` command — that command is only ever mentioned next
+        // to the count it actually applies to (see the disabled-state tests below for why).
         #expect(result.stdout.contains("only change what gets captured from now on"))
-        #expect(result.stdout.contains("openrhyme purge --apply-rules --yes"))
     }
 
     @Test func disabledStateIsUnmistakableNotJustTheWordDisabled() async throws {
@@ -98,6 +99,71 @@ import Testing
         #expect(humanResult.stdout.contains("none of the rules below are being enforced"))
         #expect(!humanResult.stdout.contains("privacy: enabled"))
         #expect(!humanResult.stdout.contains("privacy: ENABLED"))
+    }
+
+    // MARK: - H1/H2 (privacy fix round 3)
+    //
+    // With privacy disabled, `PrivacyPolicy.evaluateContext` returns `.open` unconditionally, so
+    // a naive "count under the real policy" is always 0 — read by a worried user as "nothing
+    // sensitive is stored" when it actually means "not evaluated". And our own unconditional
+    // note used to tell that same user to run `openrhyme purge --apply-rules --yes`, which would
+    // silently match nothing and report success while every one of their rows stayed put. Both
+    // seeded rows below WOULD be protected if privacy were on (one by bundle id, one by url),
+    // so a bug reverting to the old bare-zero behavior would show `0` here instead of `2`.
+
+    private func seededMatchingRowsWithPrivacyDisabled() async throws -> URL {
+        let dir = try CLIRunner.tempDataDir()
+        let store = try EventStore(url: dir.appendingPathComponent("events.sqlite"))
+        try await store.append(
+            RawEvent(ts: 1, kind: .contextSnapshot, bundleID: "com.1password.1password"))
+        try await store.append(
+            RawEvent(
+                ts: 2, kind: .contextSnapshot, bundleID: "com.google.Chrome",
+                url: "https://vault.internal/ui/vault/list"))
+        try await store.append(
+            RawEvent(ts: 3, kind: .contextSnapshot, bundleID: "com.example.NotProtected"))
+        await store.close()
+        var settings = PrivacySettings()
+        settings.enabled = false
+        try Config(privacy: settings).save(to: dir.appendingPathComponent("config.json"))
+        return dir
+    }
+
+    @Test func disabledStateReportsAHypotheticalCountNotABareZero() async throws {
+        let dir = try await seededMatchingRowsWithPrivacyDisabled()
+        let env = ["OPENRHYME_DATA_DIR": dir.path]
+
+        let jsonResult = try CLIRunner.run(["privacy", "--json"], env: env)
+        #expect(jsonResult.status == 0, "\(jsonResult.stderr)")
+        let data = try #require(try CLIRunner.json(jsonResult.stdout)["data"] as? [String: Any])
+        #expect(data["enabled"] as? Bool == false)
+        // H1: the real count these rules match (2 of the 3 seeded rows), not 0 — computed as if
+        // enabled regardless of the actual (disabled) policy state.
+        #expect(data["stored_rows_matching_rules"] as? Int == 2)
+
+        let humanResult = try CLIRunner.run(["privacy"], env: env)
+        #expect(humanResult.status == 0, "\(humanResult.stderr)")
+        // Labelled plainly as hypothetical, not presented as "stored rows matching current
+        // rules" — that phrasing is reserved for when the rules are actually in force.
+        #expect(humanResult.stdout.contains("rows these rules would match if enabled: 2"))
+        #expect(!humanResult.stdout.contains("stored rows matching current rules:"))
+        #expect(humanResult.stdout.contains("hypothetical"))
+    }
+
+    @Test func disabledStateDoesNotPresentPurgeApplyRulesAsAnActionableStep() async throws {
+        let dir = try await seededMatchingRowsWithPrivacyDisabled()
+        let result = try CLIRunner.run(["privacy"], env: ["OPENRHYME_DATA_DIR": dir.path])
+        #expect(result.status == 0, "\(result.stderr)")
+        // H2: must never read as an instruction to run right now — `purge --apply-rules` would
+        // silently match nothing while disabled and report success, leaving every counted row
+        // untouched. The enabled-state actionable sentence must not appear here at all...
+        #expect(
+            !result.stdout.contains(
+                "stored rows match the current rules; remove them with: openrhyme purge"))
+        // ...and the disabled-state text must instead say plainly that purging would do nothing
+        // right now, and that enabling privacy comes first.
+        #expect(result.stdout.contains("would remove nothing"))
+        #expect(result.stdout.contains("Enable privacy first"))
     }
 
     @Test func reportsCleanlyWithNoDatabaseAndNeverCreatesOne() throws {
