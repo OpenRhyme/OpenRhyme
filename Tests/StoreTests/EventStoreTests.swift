@@ -113,4 +113,80 @@ import Testing
         let rows = try await store.query(EventQuery(since: 0))
         #expect(rows.map(\.id) == [1, 3, 2, 5, 4])
     }
+
+    @Test func deletesByIDAndByAge() async throws {
+        let url = tempURL()
+        let store = try EventStore(url: url)
+        var ids: [Int64] = []
+        for (index, ts) in [100.0, 200.0, 300.0].enumerated() {
+            ids.append(
+                try await store.append(event(ts, .contextSnapshot, app: "app\(index)")))
+        }
+        #expect(try await store.count() == 3)
+
+        #expect(try await store.deleteEvents(ids: [ids[1]]) == 1)
+        #expect(try await store.count() == 2)
+        #expect(try await store.deleteEvents(ids: [ids[1]]) == 0)  // idempotent
+
+        #expect(try await store.deleteEvents(olderThan: 250) == 1)  // removes ts=100
+        #expect(try await store.count() == 1)
+        let remaining = try await store.query(EventQuery(since: 0))
+        #expect(remaining.map(\.ts) == [300])
+        try await store.vacuum()
+        #expect(try await store.count() == 1)
+        await store.close()
+    }
+
+    @Test func deleteEventsWithEmptyIDsIsANoOp() async throws {
+        let store = try EventStore(url: tempURL())
+        try await store.append(event(1, .appActivated))
+        #expect(try await store.deleteEvents(ids: []) == 0)
+        #expect(try await store.count() == 1)
+    }
+
+    @Test func databaseFileIsOwnerOnly() async throws {
+        let url = tempURL()
+        let store = try EventStore(url: url)
+        _ = try await store.append(event(1, .daemonStarted))
+        await store.close()
+        let mode =
+            try FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions]
+            as? NSNumber
+        #expect(mode?.int16Value == 0o600)
+    }
+
+    @Test func existingLoosePermissionedDatabaseIsTightenedOnOpen() async throws {
+        // Simulate an install from before this change: a world-readable database (and its
+        // WAL sidecars) already on disk. Opening it read-write must tighten every one of
+        // them, not just files created fresh by this run.
+        let url = tempURL()
+        do {
+            let store = try EventStore(url: url)
+            try await store.append(event(1, .daemonStarted))
+            await store.close()
+        }
+        for suffix in ["", "-wal", "-shm"] {
+            let path = url.path + suffix
+            guard FileManager.default.fileExists(atPath: path) else { continue }
+            try FileManager.default.setAttributes(
+                [.posixPermissions: NSNumber(value: Int16(0o644))], ofItemAtPath: path)
+        }
+        let looseMode =
+            try FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions]
+            as? NSNumber
+        #expect(looseMode?.int16Value == 0o644)
+
+        let reopened = try EventStore(url: url)
+        _ = try await reopened.append(event(2, .daemonStarted))
+        await reopened.close()
+
+        for suffix in ["", "-wal", "-shm"] {
+            let path = url.path + suffix
+            guard FileManager.default.fileExists(atPath: path) else { continue }
+            let mode =
+                try FileManager.default.attributesOfItem(atPath: path)[.posixPermissions]
+                as? NSNumber
+            #expect(mode?.int16Value == 0o600, "\(path) was not tightened")
+        }
+    }
 }

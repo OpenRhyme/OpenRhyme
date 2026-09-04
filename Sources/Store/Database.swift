@@ -97,6 +97,9 @@ public final class Database {
 
     /// `0` once the database is closed (this property cannot throw).
     public var lastInsertRowID: Int64 { handle.map { sqlite3_last_insert_rowid($0) } ?? 0 }
+
+    /// Rows changed (inserted, updated, or deleted) by the most recently completed statement.
+    public func changes() -> Int { handle.map { Int(sqlite3_changes($0)) } ?? 0 }
 }
 
 public final class Statement {

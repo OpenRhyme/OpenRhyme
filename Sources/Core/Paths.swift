@@ -24,7 +24,17 @@ public struct Paths: Sendable, Equatable {
         return Paths(dataDir: support.appendingPathComponent("OpenRhyme", isDirectory: true))
     }
 
+    /// Spec privacy §5.6: the store holds everything the user has read on screen, so the
+    /// directory is owner-only. An existing looser directory is tightened on every daemon start.
     public func ensureDataDir() throws {
-        try FileManager.default.createDirectory(at: dataDir, withIntermediateDirectories: true)
+        let manager = FileManager.default
+        if !manager.fileExists(atPath: dataDir.path) {
+            try manager.createDirectory(
+                at: dataDir, withIntermediateDirectories: true,
+                attributes: [.posixPermissions: NSNumber(value: Int16(0o700))])
+            return
+        }
+        try manager.setAttributes(
+            [.posixPermissions: NSNumber(value: Int16(0o700))], ofItemAtPath: dataDir.path)
     }
 }

@@ -112,7 +112,7 @@ public enum HeartbeatDiff {
             frontmost: AppInfo?, context: FocusedContext?, allowlist: Set<String>,
             recordOtherApps: Bool, maxValueBytes: Int, now: Double, trigger: Trigger = .heartbeat,
             input: InputClass? = nil, contentMemorySeconds: Double = 1800,
-            policy: PrivacyPolicy = .disabled
+            policy: PrivacyPolicy
         ) {
             self.frontmost = frontmost
             self.context = context

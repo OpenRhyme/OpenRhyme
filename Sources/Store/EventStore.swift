@@ -55,11 +55,24 @@ public actor EventStore {
                 at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
             db = try Database(url: url, mode: .readWrite)
             try Schema.migrate(db)
+            Self.tighten(url)
         }
     }
 
     public func close() {
         db.close()
+    }
+
+    /// Owner-only, including the WAL sidecars SQLite may have created. Applied on every
+    /// read-write open (spec privacy §5.6) so an already-existing, looser-permissioned
+    /// database from before this change is tightened, not just newly created ones.
+    private static func tighten(_ url: URL) {
+        let manager = FileManager.default
+        for path in [url.path, url.path + "-wal", url.path + "-shm"]
+        where manager.fileExists(atPath: path) {
+            try? manager.setAttributes(
+                [.posixPermissions: NSNumber(value: Int16(0o600))], ofItemAtPath: path)
+        }
     }
 
     private static let columns = [
@@ -150,5 +163,39 @@ public actor EventStore {
 
     public func lastEventTS() throws -> Double? {
         try db.scalarString("SELECT MAX(ts) FROM events").flatMap(Double.init)
+    }
+
+    /// Spec privacy §5.6/§5.7. Returns the number of rows actually removed, so a caller can
+    /// tell "matched nothing" (0) apart from a failure (thrown `DatabaseError`).
+    @discardableResult
+    public func deleteEvents(ids: [Int64]) throws -> Int {
+        guard !ids.isEmpty else { return 0 }
+        var removed = 0
+        // Chunked so a large purge cannot exceed SQLite's bound-variable limit.
+        for start in stride(from: 0, to: ids.count, by: 500) {
+            let chunk = Array(ids[start..<min(start + 500, ids.count)])
+            let placeholders = Array(repeating: "?", count: chunk.count).joined(separator: ", ")
+            let statement = try db.prepare("DELETE FROM events WHERE id IN (\(placeholders))")
+                .bind(chunk.map { SQLValue.int($0) })
+            _ = try statement.step()
+            removed += db.changes()
+        }
+        return removed
+    }
+
+    /// Spec privacy §5.6/§5.7. Returns the number of rows actually removed.
+    @discardableResult
+    public func deleteEvents(olderThan ts: Double) throws -> Int {
+        let statement = try db.prepare("DELETE FROM events WHERE ts < ?").bind([.real(ts)])
+        _ = try statement.step()
+        return db.changes()
+    }
+
+    /// Reclaims free pages so deleted text does not linger in the file. Must not be called
+    /// while a transaction is open: SQLite refuses `VACUUM` inside one. `deleteEvents` never
+    /// leaves one open — each `DELETE` runs and completes (auto-commits) before returning —
+    /// so calling this right after a delete is always safe.
+    public func vacuum() throws {
+        try db.exec("VACUUM")
     }
 }
