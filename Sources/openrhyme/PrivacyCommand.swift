@@ -40,6 +40,14 @@ struct PrivacyCommand: AsyncParsableCommand {
         /// way the field means the same thing in both states — "how many rows match these rule
         /// definitions" — and `enabled` alone tells you whether that's real or hypothetical.
         let storedRowsMatchingRules: Int
+        /// Privacy fix round 5, P2: the human line has carried the caveat since round 3, but
+        /// `--json` still handed a script — or an agent reading through the MCP server — a bare
+        /// `"stored_rows_matching_rules": 0`, which is exactly the reassurance the human output
+        /// was fixed to stop giving. Renaming the count to say so is not available (`--json`
+        /// shapes are a public contract), so the caveat is added beside it as its own field,
+        /// always present, saying the same thing the human line says — including, while privacy
+        /// is off, that the number is hypothetical.
+        let storedRowsMatchingRulesCaveat: String
         /// Privacy fix round 1: `capture.retention_days` was reported by no command before this
         /// — `0` means unset/keep everything.
         let retentionDays: Int
@@ -67,6 +75,7 @@ struct PrivacyCommand: AsyncParsableCommand {
             case frontmostApp = "frontmost_app"
             case frontmostVerdict = "frontmost_verdict"
             case storedRowsMatchingRules = "stored_rows_matching_rules"
+            case storedRowsMatchingRulesCaveat = "stored_rows_matching_rules_caveat"
             case retentionDays = "retention_days"
             case configWarnings = "config_warnings"
         }
@@ -99,6 +108,8 @@ struct PrivacyCommand: AsyncParsableCommand {
                 frontmostApp: frontmostApp,
                 frontmostVerdict: frontmostVerdict,
                 storedRowsMatchingRules: storedRowsMatchingRules,
+                storedRowsMatchingRulesCaveat: Self.matchCountCaveatJSON(
+                    enabled: policy.enabled),
                 retentionDays: config.capture.retentionDays,
                 configWarnings: Self.configWarnings(for: config))
         }
@@ -179,11 +190,31 @@ struct PrivacyCommand: AsyncParsableCommand {
     /// matches no rule and is not counted, and `purge --apply-rules` will not remove it either.
     /// The caveat rides on the number itself, in both the enabled and disabled wordings, so the
     /// count can never be quoted or skimmed without it.
-    static let matchCountCaveat =
-        " — a rule-match count ONLY. This is not a measure of how much sensitive data is stored: "
+    ///
+    /// The substance lives in `matchCountCaveatBody` so the human line and the JSON field
+    /// (`stored_rows_matching_rules_caveat`, privacy fix round 5 P2) cannot drift into saying
+    /// different things about the same number.
+    static let matchCountCaveatBody =
+        "a rule-match count ONLY. This is not a measure of how much sensitive data is stored: "
         + "a row no protect rule matches is not counted here even if it contains a secret, and "
         + "`purge --apply-rules` would not remove it either. To see what is actually in the "
-        + "store, read it unredacted with: openrhyme events --since 7d --ignore-privacy"
+        + "store, read it unredacted with: openrhyme events --since 7d --ignore-privacy "
+        + "(that prints every stored text column in full; add --json for the raw rows)."
+
+    static let matchCountCaveat = " — " + matchCountCaveatBody
+
+    /// The JSON sibling of `matchCountCaveat`. While privacy is off the count is hypothetical
+    /// (computed as if the rules were enabled), and the human output says so on its own line —
+    /// so the JSON caveat has to carry that sentence too, or `--json` is left with a second bare
+    /// number to misread.
+    static func matchCountCaveatJSON(enabled: Bool) -> String {
+        let base = "stored_rows_matching_rules is " + matchCountCaveatBody
+        guard !enabled else { return base }
+        return base
+            + " Privacy is currently DISABLED, so this is a hypothetical count — nothing is "
+            + "being matched right now, and `openrhyme purge --apply-rules` would remove nothing "
+            + "while it stays off."
+    }
 
     static func human(_ result: Result) -> String {
         var lines: [String] = []

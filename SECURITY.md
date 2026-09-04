@@ -12,7 +12,7 @@ OpenRhyme's proposition is that it can read almost everything on your screen and
 - Sensitive contexts — password-manager apps, vault and credential URLs, `.env` and key files, credential-named fields — are **never read**, not read and discarded: the policy is checked before the content ladder runs, so the text never enters the process.
 - Recognised secret shapes (AWS/GitHub/Stripe/Slack/Google/OpenAI/Anthropic keys, private-key blocks, JWTs, `key=value` secrets, connection-string passwords) are redacted from what is captured, in every stored text column, and redacted again on every read — so a rule added today also protects rows captured before it existed. The additional high-entropy-token backstop runs on captured field content (`value`/`selected_text`) only, not on URLs, document paths or titles, where it would shred opaque resource ids that are names rather than credentials.
 - The data directory is `0700` and the database file `0600`, so no other local account can read them.
-- The MCP server has no independent database access: it reads through the engine's own CLI, so nothing it returns can bypass redaction.
+- The MCP server reads events only through the engine's own CLI, so nothing it returns can bypass redaction. Its one direct use of the database is a read-only (`mode=ro`) startup handshake that reads the schema version out of the `meta` table; it reads no event rows that way.
 
 A change that weakens any of these is a security issue even when intentional — it must be discussed in the open first.
 

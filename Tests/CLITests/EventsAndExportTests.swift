@@ -252,6 +252,62 @@ import Testing
         }
     }
 
+    /// Privacy fix round 5, P1: `openrhyme privacy` tells a worried user to audit their store
+    /// with `openrhyme events --since 7d --ignore-privacy`, and that command's stderr warning
+    /// promises "any secret in the store is printed in the clear". The human renderer printed a
+    /// single column — `window_title ?? element_title ?? value.prefix(60)` — so on a row that
+    /// *has* a window title (the ordinary case) `url`, `document`, `value` and `selected_text`
+    /// were never shown at all. Following our own instruction and grepping the output therefore
+    /// came back empty while the secret sat in the file: the exact false-confidence defect this
+    /// whole slice exists to prevent, reintroduced by the sentence added to prevent it.
+    ///
+    /// The row below is deliberately the shape that made the bug invisible: the secret is in
+    /// `url` and in `value`, on a row that also carries a window title.
+    @Test func ignorePrivacyHumanOutputRevealsEveryStoredTextColumnNotJustTheTitle() async throws {
+        let secret = "AKIAQQQQWWWWEEEERRRR"
+        let dir = try CLIRunner.tempDataDir()
+        let store = try EventStore(url: dir.appendingPathComponent("events.sqlite"))
+        try await store.append(
+            RawEvent(
+                ts: 100, kind: .contextSnapshot, bundleID: "com.apple.Safari",
+                windowTitle: "Quarterly report",  // present — this is what hid everything else
+                document: "/Users/me/keys/\(secret).txt",
+                url: "https://ex.com/callback?token=\(secret)",
+                elementTitle: "Body",
+                value: "aws key \(secret) trailing",
+                selectedText: "\(secret)",
+                extra: ["previousTitle": .string("Draft \(secret)")]))
+        await store.close()
+        let env = ["OPENRHYME_DATA_DIR": dir.path]
+
+        // Exactly the command `openrhyme privacy` recommends: human output, no --json.
+        let raw = try CLIRunner.run(["events", "--since", "0", "--ignore-privacy"], env: env)
+        #expect(raw.status == 0, "\(raw.stderr)")
+        #expect(raw.stderr.contains("any secret in the store is printed in the clear"))
+        #expect(
+            raw.stdout.contains(secret),
+            "the command the product recommends must actually surface the secret")
+        #expect(raw.stdout.contains("url: https://ex.com/callback?token=\(secret)"))
+        #expect(raw.stdout.contains("value: aws key \(secret) trailing"))
+        #expect(raw.stdout.contains("selected_text: \(secret)"))
+        #expect(raw.stdout.contains("document: /Users/me/keys/\(secret).txt"))
+        #expect(raw.stdout.contains("element_title: Body"))
+        #expect(raw.stdout.contains("window_title: Quarterly report"))
+        // `extra.previousTitle` is captured text too (`EventRedaction` redacts it), so the
+        // unredacted view has to show it or the promise is still only mostly true.
+        #expect(raw.stdout.contains("extra.previousTitle: Draft \(secret)"))
+        // The warning stays on stderr; stdout is still one summary line per event plus columns.
+        #expect(!raw.stdout.contains("warning:"))
+        #expect(raw.stdout.contains("context.snapshot  com.apple.Safari  Quarterly report"))
+
+        // Without the flag nothing changes: still redacted, still one line per event.
+        let redacted = try CLIRunner.run(["events", "--since", "0"], env: env)
+        #expect(redacted.status == 0, "\(redacted.stderr)")
+        #expect(!redacted.stdout.contains(secret))
+        #expect(redacted.stdout.split(separator: "\n").count == 1)
+        #expect(!redacted.stdout.contains("value:"))
+    }
+
     @Test func maxValueCharsTruncatesAndZeroMeansFull() async throws {
         let dir = try CLIRunner.tempDataDir()
         let store = try EventStore(url: dir.appendingPathComponent("events.sqlite"))

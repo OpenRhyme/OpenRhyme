@@ -156,6 +156,50 @@ import Testing
         #expect(!result.stdout.contains("stored rows matching current rules:"))
     }
 
+    /// Privacy fix round 5, P2: the human line carries the caveat, but `--json` handed a script
+    /// — or an agent reading through the MCP server — a bare `"stored_rows_matching_rules": 0`,
+    /// which is precisely the reassurance the human output was fixed to stop giving. The key is
+    /// a public contract and cannot be renamed, so the caveat rides beside it as its own
+    /// always-present field.
+    @Test func theJSONMatchCountCarriesTheSameCaveatAsTheHumanLine() async throws {
+        let dir = try CLIRunner.tempDataDir()
+        let store = try EventStore(url: dir.appendingPathComponent("events.sqlite"))
+        try await store.append(
+            RawEvent(
+                ts: 1, kind: .contextSnapshot, bundleID: "com.example.NotProtected",
+                value: "token AKIAQQQQWWWWEEEERRRR end"))
+        await store.close()
+
+        let result = try CLIRunner.run(
+            ["privacy", "--json"], env: ["OPENRHYME_DATA_DIR": dir.path])
+        #expect(result.status == 0, "\(result.stderr)")
+        let data = try #require(try CLIRunner.json(result.stdout)["data"] as? [String: Any])
+        #expect(data["stored_rows_matching_rules"] as? Int == 0)
+        let caveat = try #require(data["stored_rows_matching_rules_caveat"] as? String)
+        #expect(caveat.contains("rule-match count ONLY"))
+        #expect(caveat.contains("even if it contains a secret"))
+        #expect(caveat.contains("openrhyme events --since 7d --ignore-privacy"))
+    }
+
+    /// The disabled state has to reach a JSON reader too: there the count is hypothetical, and a
+    /// caveat that did not say so would be a second bare number to misread.
+    @Test func theJSONCaveatSaysTheCountIsHypotheticalWhilePrivacyIsOff() async throws {
+        let dir = try CLIRunner.tempDataDir()
+        var settings = PrivacySettings()
+        settings.enabled = false
+        try Config(privacy: settings).save(to: dir.appendingPathComponent("config.json"))
+
+        let result = try CLIRunner.run(
+            ["privacy", "--json"], env: ["OPENRHYME_DATA_DIR": dir.path])
+        #expect(result.status == 0, "\(result.stderr)")
+        let data = try #require(try CLIRunner.json(result.stdout)["data"] as? [String: Any])
+        #expect(data["enabled"] as? Bool == false)
+        let caveat = try #require(data["stored_rows_matching_rules_caveat"] as? String)
+        #expect(caveat.contains("rule-match count ONLY"))
+        #expect(caveat.contains("hypothetical"))
+        #expect(caveat.contains("purge --apply-rules"))
+    }
+
     @Test func disabledStateIsUnmistakableNotJustTheWordDisabled() async throws {
         let dir = try CLIRunner.tempDataDir()
         var settings = PrivacySettings()

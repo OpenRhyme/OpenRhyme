@@ -166,11 +166,12 @@ Putting a default value in `remove` turns off just that one protection (e.g. `"p
   openrhyme purge --app com.example.SomeApp --yes
   ```
 - **`openrhyme inspect --ignore-privacy`** — the dev tool that shows exactly what the daemon can see for the frontmost app. By default it honours the same policy as capture: pointed at a protected context it prints only the rule name, and on an open context it still applies the credential-field guard and secret redaction to the element, its subtree and the window's title/document/URL. `--ignore-privacy` overrides all of that for debugging, prints a warning to stderr first, and never writes to the store. (The `AXSecureTextField` guard is unconditional and `--ignore-privacy` does not lift it.)
-- **`openrhyme events --ignore-privacy`, `openrhyme export --ignore-privacy`** — the same flag on the read commands: returns stored text exactly as it sits in the database, with no read-time redaction. This is how you audit your own history — find out whether something sensitive was captured, and confirm a purge removed it. Warns on stderr (never on stdout, so `--json` stays parseable) and is opt-in only; without it every read stays redacted, including the MCP server's.
+- **`openrhyme events --ignore-privacy`, `openrhyme export --ignore-privacy`** — the same flag on the read commands: returns stored text exactly as it sits in the database, with no read-time redaction. This is how you audit your own history — find out whether something sensitive was captured, and confirm a purge removed it. Warns on stderr (never on stdout, so `--json` stays parseable) and is opt-in only; without it every read stays redacted, including the MCP server's. With the flag, `events` prints every stored text column in full under each event — `window_title`, `document`, `url`, `element_title`, `value`, `selected_text`, `extra.previousTitle` — not just the one-line summary the redacted view shows, so a plain `grep` of the human output sees everything `--json` would.
   ```sh
-  openrhyme events --since 7d --ignore-privacy --json | grep -i 'AKIA'   # is my key in there?
+  openrhyme events --since 7d --ignore-privacy | grep -i 'AKIA'          # is my key in there?
   openrhyme purge --apply-rules --yes
-  openrhyme events --since 7d --ignore-privacy --json | grep -i 'AKIA'   # …and is it gone?
+  openrhyme events --since 7d --ignore-privacy | grep -i 'AKIA'          # …and is it gone?
+  openrhyme events --since 7d --ignore-privacy --json                    # same rows, machine-readable
   ```
 
 ### What a protected marker row looks like

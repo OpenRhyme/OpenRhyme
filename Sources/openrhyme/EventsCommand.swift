@@ -97,7 +97,8 @@ struct EventsCommand: AsyncParsableCommand {
     }
 
     func run() async throws {
-        try await runJSON(json: json, human: Self.humanLines) {
+        let unredacted = ignorePrivacy
+        try await runJSON(json: json, human: { Self.humanLines($0, unredacted: unredacted) }) {
             let query = EventQuery(
                 since: try TimeSpec.parse(since),
                 until: try until.map { try TimeSpec.parse($0) },
@@ -125,7 +126,42 @@ struct EventsCommand: AsyncParsableCommand {
         "warning: --ignore-privacy returns stored text unredacted — any secret in the store is "
         + "printed in the clear"
 
-    static func humanLines(_ result: Result) -> String {
+    /// Every stored column that holds captured text, named exactly as the schema and `--json`
+    /// name it. The list mirrors `EventRedaction.apply` deliberately: anything the redactor would
+    /// have hidden is something `--ignore-privacy` must be able to show, so the two lists have to
+    /// stay the same list. Empty strings are skipped; nothing is truncated here (`project` has
+    /// already applied `--max-value-chars`, if the caller asked for it).
+    static func textColumns(of event: RawEvent) -> [(name: String, text: String)] {
+        var columns: [(name: String, text: String)] = []
+        func add(_ name: String, _ text: String?) {
+            guard let text, !text.isEmpty else { return }
+            columns.append((name, text))
+        }
+        add("window_title", event.windowTitle)
+        add("document", event.document)
+        add("url", event.url)
+        add("element_title", event.elementTitle)
+        add("value", event.value)
+        add("selected_text", event.selectedText)
+        // The one place `extra` carries captured text (`HeartbeatDiff` copies the prior window
+        // title onto a `window.title_changed` row), so the one `extra` key that belongs here.
+        add("extra.previousTitle", event.extra?["previousTitle"]?.stringValue)
+        return columns
+    }
+
+    /// Privacy fix round 5, P1. The human view rendered one column —
+    /// `window_title ?? element_title ?? value.prefix(60)` — so `url`, `document`, `value` and
+    /// `selected_text` were invisible on any row that had a window title, which is the ordinary
+    /// row. That turned the command `openrhyme privacy` recommends into the very defect this
+    /// slice exists to prevent: it printed the stderr promise that "any secret in the store is
+    /// printed in the clear", then withheld the columns most likely to hold one, so a careful
+    /// person who grepped the output concluded they were clean while the secret sat in the file.
+    ///
+    /// With `--ignore-privacy` the summary line is followed by every stored text column in full,
+    /// each under its schema column name. The flag exists so the owner can audit their own store;
+    /// a human view that hides columns defeats its only purpose. The default view is untouched —
+    /// still exactly one line per event — because it is the redacted, everyday one.
+    static func humanLines(_ result: Result, unredacted: Bool = false) -> String {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime]
         return result.events.map { event in
@@ -133,7 +169,10 @@ struct EventsCommand: AsyncParsableCommand {
             let app = event.bundleID ?? "-"
             let detail =
                 event.windowTitle ?? event.elementTitle ?? event.value?.prefix(60).description ?? ""
-            return "\(time)  \(event.kind.rawValue)  \(app)  \(detail)"
+            let summary = "\(time)  \(event.kind.rawValue)  \(app)  \(detail)"
+            guard unredacted else { return summary }
+            let columns = Self.textColumns(of: event).map { "    \($0.name): \($0.text)" }
+            return ([summary] + columns).joined(separator: "\n")
         }.joined(separator: "\n")
     }
 }

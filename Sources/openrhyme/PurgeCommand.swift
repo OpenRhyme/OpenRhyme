@@ -30,12 +30,31 @@ struct PurgeCommand: AsyncParsableCommand {
         let deleted: Int
         let vacuumed: Bool
         let dryRun: Bool
+        /// Privacy fix round 5, P3: `--apply-rules` reported a bare `0 row(s) would be deleted`,
+        /// which means "no protect rule matched" and never "nothing sensitive is here" — the same
+        /// false reassurance `openrhyme privacy`'s match count was fixed for. Set only when
+        /// `--apply-rules` was used, so it is the rule-based selection that makes the claim and
+        /// every other purge's `--json` shape is byte-for-byte what it was (a `nil` optional is
+        /// not encoded at all).
+        var ruleMatchCaveat: String? = nil
 
         enum CodingKeys: String, CodingKey {
             case matched, deleted, vacuumed
             case dryRun = "dry_run"
+            case ruleMatchCaveat = "rule_match_caveat"
         }
     }
+
+    /// The `--apply-rules` counterpart of `PrivacyCommand.matchCountCaveat`, in the same voice
+    /// and pointing at the same audit command: a count of rule matches is not a measure of what
+    /// is stored, in a dry run or after a real deletion. Stored as a bare sentence so the JSON
+    /// field reads as prose; `humanLines` adds the " — note: " that joins it to the outcome line.
+    static let ruleMatchCaveat =
+        "--apply-rules selects ONLY rows a protect rule matches (bundle id, URL, "
+        + "document, window title). That is not a measure of how much sensitive data is stored: "
+        + "a row no rule matches is not selected here even if it contains a secret, so this "
+        + "count is never a clean bill of health. To see what is actually in the store, read it "
+        + "unredacted with: openrhyme events --since 7d --ignore-privacy"
 
     /// Pure selection so the matching rules are testable without a store. `--apply-rules`
     /// evaluates the real `PrivacyPolicy`, so there is never a second matcher to drift. Stored
@@ -393,29 +412,47 @@ struct PurgeCommand: AsyncParsableCommand {
                 events: candidates, app: app, urlContains: urlContains, applyRules: applyRules,
                 policy: policy)
 
+            // P3: the caveat belongs to the selection, not to the outcome, so it rides on every
+            // `--apply-rules` result — dry run, refusal-free zero, and real deletion alike.
+            let caveat = applyRules ? Self.ruleMatchCaveat : nil
+
             guard !dryRun else {
                 await store.close()
-                return Result(matched: selected.count, deleted: 0, vacuumed: false, dryRun: true)
+                return Result(
+                    matched: selected.count, deleted: 0, vacuumed: false, dryRun: true,
+                    ruleMatchCaveat: caveat)
             }
             guard yes else {
                 throw CLIError(
                     code: "confirmation_required",
-                    message: "\(selected.count) rows match; deletion is permanent",
+                    // P3: this is the first place most people see the count — `purge
+                    // --apply-rules` with no other flag — so it needs the caveat as much as the
+                    // dry run does. "0 rows match" here means "no rule matched", not "nothing
+                    // sensitive is here".
+                    message: "\(selected.count) rows match; deletion is permanent"
+                        + (caveat.map { " — note: \($0)" } ?? ""),
                     hint: "Re-run with --yes to delete, or --dry-run to see the selection",
                     exitCode: 2)
             }
 
-            let result = try await Self.destroy(
+            var result = try await Self.destroy(
                 selected: selected,
                 delete: { try await store.deleteEvents(ids: $0) },
                 vacuum: { try await store.vacuum() },
                 checkpoint: { try await store.checkpointTruncate() })
             await store.close()
+            result.ruleMatchCaveat = caveat
             return result
         }
     }
 
+    /// P3: whatever the outcome line says, a `--apply-rules` selection carries its caveat with
+    /// it — the count it reports is a rule-match count in every one of these branches.
     static func humanLines(_ result: Result) -> String {
+        outcomeLine(result) + (result.ruleMatchCaveat.map { " — note: \($0)" } ?? "")
+    }
+
+    private static func outcomeLine(_ result: Result) -> String {
         if result.dryRun {
             return "\(result.matched) row(s) would be deleted (dry run; nothing changed)"
         }

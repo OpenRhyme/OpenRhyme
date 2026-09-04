@@ -520,6 +520,83 @@ import Testing
         #expect(data?["matched"] as? Int == 1)
     }
 
+    /// Privacy fix round 5, P3: `purge --apply-rules --dry-run` printed a bare
+    /// `0 row(s) would be deleted`. Like `openrhyme privacy`'s match count, that number means
+    /// "no protect rule matched", never "nothing sensitive is here" — the seeded row below holds
+    /// an AWS key and matches no rule — so a user who reads it as a clean bill of health is being
+    /// reassured by us, wrongly. The caveat rides on the count, on both surfaces.
+    @Test func applyRulesSaysAZeroIsARuleMatchCountNotACleanBillOfHealth() async throws {
+        let dir = try CLIRunner.tempDataDir()
+        let store = try EventStore(url: dir.appendingPathComponent("events.sqlite"))
+        try await store.append(
+            RawEvent(
+                ts: 1, kind: .contextSnapshot, bundleID: "com.example.NotProtected",
+                value: "token AKIAQQQQWWWWEEEERRRR end"))
+        await store.close()
+        let env = ["OPENRHYME_DATA_DIR": dir.path]
+
+        let human = try CLIRunner.run(
+            ["purge", "--since", "0", "--apply-rules", "--dry-run"], env: env)
+        #expect(human.status == 0, "\(human.stderr)")
+        #expect(human.stdout.contains("0 row(s) would be deleted"))
+        #expect(human.stdout.contains("ONLY rows a protect rule matches"))
+        #expect(human.stdout.contains("even if it contains a secret"))
+        #expect(human.stdout.contains("openrhyme events --since 7d --ignore-privacy"))
+
+        let json = try CLIRunner.run(
+            ["purge", "--since", "0", "--apply-rules", "--dry-run", "--json"], env: env)
+        #expect(json.status == 0, "\(json.stderr)")
+        let data = try #require(try CLIRunner.json(json.stdout)["data"] as? [String: Any])
+        #expect(data["matched"] as? Int == 0)
+        let caveat = try #require(data["rule_match_caveat"] as? String)
+        #expect(caveat.contains("ONLY rows a protect rule matches"))
+        #expect(caveat.contains("openrhyme events --since 7d --ignore-privacy"))
+
+        // A purge that is not rule-based makes no such claim, so it carries no such caveat —
+        // the existing `--json` shape is unchanged for every other selection.
+        let byTime = try CLIRunner.run(
+            ["purge", "--since", "0", "--all", "--dry-run", "--json"], env: env)
+        #expect(byTime.status == 0, "\(byTime.stderr)")
+        let plain = try #require(try CLIRunner.json(byTime.stdout)["data"] as? [String: Any])
+        #expect(plain["matched"] as? Int == 1)
+        #expect(plain["rule_match_caveat"] == nil)
+        let plainHuman = try CLIRunner.run(
+            ["purge", "--since", "0", "--all", "--dry-run"], env: env)
+        #expect(plainHuman.stdout.contains("1 row(s) would be deleted"))
+        #expect(!plainHuman.stdout.contains("protect rule"))
+    }
+
+    /// The same caveat has to survive an executed purge: "deleted 0 of 0 matching row(s)" reads
+    /// as a clean bill of health just as readily as the dry run did.
+    @Test func anExecutedApplyRulesPurgeCarriesTheCaveatToo() async throws {
+        let dir = try CLIRunner.tempDataDir()
+        let store = try EventStore(url: dir.appendingPathComponent("events.sqlite"))
+        try await store.append(
+            RawEvent(
+                ts: 1, kind: .contextSnapshot, bundleID: "com.example.NotProtected",
+                value: "token AKIAQQQQWWWWEEEERRRR end"))
+        await store.close()
+
+        let result = try CLIRunner.run(
+            ["purge", "--since", "0", "--apply-rules", "--yes"],
+            env: ["OPENRHYME_DATA_DIR": dir.path])
+        #expect(result.status == 0, "\(result.stderr)")
+        #expect(result.stdout.contains("0 of 0 matching row(s) deleted"))
+        #expect(result.stdout.contains("ONLY rows a protect rule matches"))
+
+        // And the confirmation refusal — `purge --apply-rules` with no other flag, the first
+        // place most people meet the count at all — carries it too.
+        let refused = try CLIRunner.run(
+            ["purge", "--since", "0", "--apply-rules", "--json"],
+            env: ["OPENRHYME_DATA_DIR": dir.path])
+        #expect(refused.status == 2)
+        let error = try #require(try CLIRunner.json(refused.stdout)["error"] as? [String: Any])
+        #expect(error["code"] as? String == "confirmation_required")
+        #expect((error["message"] as? String)?.contains("0 rows match") == true)
+        #expect(
+            (error["message"] as? String)?.contains("ONLY rows a protect rule matches") == true)
+    }
+
     @Test func noFiltersAndNoAllIsAUsageErrorNotAnImplicitPurgeEverything() async throws {
         let (_, env) = try await seeded()
         let result = try CLIRunner.run(["purge", "--yes", "--json"], env: env)

@@ -471,17 +471,30 @@ import Testing
         capturer.tick()
         #expect(fake.observedKinds[10]?.contains(.menuItemSelected) == false)
         #expect(fake.observedKinds[10]?.contains(.focusedWindowChanged) == true)
+        // Privacy fix round 5, P4: the belt-and-braces delivery below used to prove nothing.
+        // `Capturer.handle` drops the change on `enabledKinds`, and even past that
+        // `recordMenuSelection` refuses a bundle-id-protected app — so "no title was recorded"
+        // held no matter which gate was broken, and the assertion could not fail. What *is*
+        // observable is whether the notification recorded anything **at all**: a leak past the
+        // delivery gate emits a fresh protected marker stamped with the notification's own ts.
+        // That is only distinguishable while the last recorded context is a different one, so
+        // move focus to an unprotected app first — otherwise the marker dedups against the one
+        // the heartbeat above already emitted and the delivery is unobservable again.
+        fake.show(textEdit, window: WindowInfo(title: "notes.md"))
+        capturer.tick()
+        fake.frontmost = safari  // Safari is frontmost again when the queued notification lands
 
-        // Belt and braces: deliver one anyway, as a reload race would.
+        // Deliver one anyway, as a notification queued across a config reload would.
         fake.deliver(
             ObservedChange(
                 pid: 10, kind: .menuItemSelected,
                 menuTitle: "Copy Password for github.com (work)", ts: 7))
         let events = await drain(capturer)
+        // Nothing whatsoever was recorded for it — not the title, and not a marker either.
+        #expect(!events.contains { $0.ts == 7 })
         #expect(!events.map(\.kind).contains(.menuItemSelected))
         #expect(!events.contains { $0.elementTitle?.contains("Password") == true })
-        let marker = try #require(events.last { $0.kind == .contextSnapshot })
-        #expect(marker.extra?["protectedBy"] == "bundle-id")
+        #expect(events.contains { $0.extra?["protectedBy"] == "bundle-id" })
     }
 
     /// C1: `File ▸ Open Recent` and `Window ▸ …` carry exactly the `.env` and `*.pem` paths the
