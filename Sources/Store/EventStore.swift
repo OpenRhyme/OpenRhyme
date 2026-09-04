@@ -195,7 +195,29 @@ public actor EventStore {
     /// while a transaction is open: SQLite refuses `VACUUM` inside one. `deleteEvents` never
     /// leaves one open — each `DELETE` runs and completes (auto-commits) before returning —
     /// so calling this right after a delete is always safe.
+    ///
+    /// In WAL mode (used for every read-write connection) this rewrite lands in the WAL, not
+    /// `events.sqlite` itself, until something checkpoints it — call `checkpointTruncate()`
+    /// afterward to actually get it onto disk; see there for why that step cannot be skipped.
     public func vacuum() throws {
         try db.exec("VACUUM")
+    }
+
+    /// Folds WAL frames — including a preceding `vacuum()`'s full rewrite — back into
+    /// `events.sqlite` itself. Without this, deleted content can survive on disk indefinitely:
+    /// SQLite only checkpoints automatically when the *last* connection to the database closes,
+    /// and a live daemon holding its own connection open means a purge's own close is never
+    /// last (measured: 200 marker rows survived a purge, 12,000 further inserts, and 1.7 MB of
+    /// WAL growth with a second connection held open, dropping to zero only when it closed).
+    ///
+    /// `PRAGMA wal_checkpoint(TRUNCATE)` reports contention by returning a row rather than
+    /// throwing: its first column ("busy") is `1` when another connection's active read
+    /// transaction prevented a full checkpoint. Returns `true` only when the checkpoint fully
+    /// completed (`busy == 0`); returns `false` — never claims success — when it was busy. Only
+    /// a genuine SQL error throws.
+    public func checkpointTruncate() throws -> Bool {
+        let statement = try db.prepare("PRAGMA wal_checkpoint(TRUNCATE)")
+        guard try statement.step() else { return true }  // no row: nothing pending
+        return statement.int64(0) != 1
     }
 }

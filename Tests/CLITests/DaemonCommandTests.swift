@@ -141,4 +141,18 @@ import Testing
         }
         #expect(calls == 1)
     }
+
+    /// F7: `1...attempts` traps when `attempts` is 0 (or negative) — an invalid `ClosedRange`.
+    @Test func appendWithRetryDoesNotTrapWhenAttemptsIsZeroOrNegative() async throws {
+        for attempts in [0, -1] {
+            var calls = 0
+            await #expect(throws: DatabaseError.self) {
+                try await DaemonCommand.appendWithRetry(attempts: attempts, sleep: noSleep) {
+                    calls += 1
+                    throw DatabaseError(code: 5, message: "database is locked")
+                }
+            }
+            #expect(calls == 1)
+        }
+    }
 }

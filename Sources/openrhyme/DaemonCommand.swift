@@ -105,6 +105,7 @@ struct DaemonCommand: AsyncParsableCommand {
         sleep: (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
         _ append: () async throws -> Void
     ) async throws {
+        let attempts = max(attempts, 1)
         var delay = initialDelay
         for attempt in 1...attempts {
             do {

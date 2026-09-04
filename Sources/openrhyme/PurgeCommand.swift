@@ -102,12 +102,14 @@ struct PurgeCommand: AsyncParsableCommand {
 
     /// Retries a transient lock briefly with exponential backoff; any other error, or the last
     /// attempt's error, propagates immediately. `sleep` is injectable so tests can exhaust every
-    /// attempt without actually waiting.
+    /// attempt without actually waiting. `attempts < 1` is treated as `1` (always try at least
+    /// once) rather than trapping on an invalid `1...0` range.
     static func retryOnBusy<T>(
         attempts: Int = 3, initialDelay: Duration = .milliseconds(300),
         sleep: (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
         _ operation: () async throws -> T
     ) async throws -> T {
+        let attempts = max(attempts, 1)
         var delay = initialDelay
         var lastError: Error?
         for attempt in 1...attempts {
@@ -121,6 +123,25 @@ struct PurgeCommand: AsyncParsableCommand {
             }
         }
         throw lastError!
+    }
+
+    /// Retries an operation that reports contention by returning `false` rather than throwing —
+    /// `EventStore.checkpointTruncate()`'s `busy` result — with the same short backoff as
+    /// `retryOnBusy`. Returns `false` (never throws for contention) once attempts are exhausted.
+    static func retryUntilTrue(
+        attempts: Int = 3, initialDelay: Duration = .milliseconds(300),
+        sleep: (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
+        _ operation: () async throws -> Bool
+    ) async throws -> Bool {
+        let attempts = max(attempts, 1)
+        var delay = initialDelay
+        for attempt in 1...attempts {
+            if try await operation() { return true }
+            guard attempt < attempts else { return false }
+            try? await sleep(delay)
+            delay *= 2
+        }
+        return false
     }
 
     /// Thrown when a chunk of a multi-chunk delete fails after exhausting its retries: carries
@@ -137,6 +158,12 @@ struct PurgeCommand: AsyncParsableCommand {
     /// chunks already committed. A retry re-submits the same id list, which is always safe:
     /// deleting an id a second time (already gone from an earlier, successful attempt) matches
     /// zero rows and changes nothing.
+    ///
+    /// Chunks are not wrapped in one transaction spanning the whole selection, deliberately: a
+    /// single all-or-nothing transaction over a large purge would hold a write lock for as long
+    /// as the purge takes, starving the daemon's own writes exactly when it must not be blocked.
+    /// Id-based deletion is naturally resumable instead — a later purge (or retry) of the same
+    /// selection just finds fewer rows left to remove.
     static func deleteWithRetry(
         ids: [Int64], attempts: Int = 3,
         sleep: (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
@@ -156,31 +183,55 @@ struct PurgeCommand: AsyncParsableCommand {
         return deleted
     }
 
-    /// What actually happened after delete + vacuum. `vacuumWarning` is non-nil exactly when
-    /// `result.vacuumed` is false, and is reported by the caller (never printed from here, so
-    /// this stays pure and testable with no real stderr involved).
-    struct DestroyOutcome {
-        let result: Result
-        let vacuumWarning: String?
+    /// Runs `vacuum` then `checkpoint`, each with its own retry budget, and never throws: either
+    /// step failing to fully complete just means the content is not yet reclaimed from disk,
+    /// which the caller reports as `vacuumed: false` rather than as an operation failure. Returns
+    /// `true` only when both genuinely completed, plus a human-readable reason when they didn't.
+    private static func attemptVacuumAndCheckpoint(
+        attempts: Int, sleep: (Duration) async throws -> Void,
+        vacuum: () async throws -> Void, checkpoint: () async throws -> Bool
+    ) async -> (reclaimed: Bool, detail: String) {
+        do {
+            try await retryOnBusy(attempts: attempts, sleep: sleep) { try await vacuum() }
+        } catch {
+            return (false, "VACUUM did not complete (\(error))")
+        }
+        do {
+            let checkpointed = try await retryUntilTrue(attempts: attempts, sleep: sleep) {
+                try await checkpoint()
+            }
+            guard checkpointed else {
+                return (
+                    false,
+                    "the WAL checkpoint stayed busy — another connection (likely the daemon) is "
+                        + "still holding the database open"
+                )
+            }
+            return (true, "")
+        } catch {
+            return (false, "the WAL checkpoint failed (\(error))")
+        }
     }
 
     /// The destructive half of a purge: delete the selection, then reclaim the freed pages.
-    /// Injectable `delete`/`vacuum` so the lock-retry and vacuum-failure paths are unit-testable
-    /// without racing a real SQLite lock.
+    /// Injectable `delete`/`vacuum`/`checkpoint` so the lock-retry and incomplete-reclaim paths
+    /// are unit-testable without racing a real SQLite lock.
     ///
-    /// A vacuum failure is reported very differently from a delete failure. A delete that never
-    /// completes is a no-op the user can safely retry, so it throws and stops. A vacuum that
-    /// fails *after* a successful delete is not: the rows are already gone from the table, and a
-    /// VACUUM is what actually removes deleted content from the file — until it succeeds, that
-    /// content survives in SQLite's free pages and is recoverable with a hex editor. That is a
-    /// privacy property, not housekeeping, so this never reports an unqualified success when it
-    /// happens: `vacuumed` comes back false and `vacuumWarning` explains what to do next.
+    /// Every way this can finish short of "deleted everything asked for and reclaimed it from
+    /// disk" throws, carrying `matched`/`deleted`/`vacuumed` as structured `CLIError.data` (so a
+    /// script reading `ok: false` is never left guessing what state that left the store in) and
+    /// a human message that says exactly what did and did not happen. A vacuum/checkpoint that
+    /// never completes is not housekeeping — the rows are already gone from the table, but
+    /// SQLite's free pages (and, until checkpointed, the WAL) still hold their plaintext content,
+    /// recoverable with a hex editor — so it is reported as a failed purge (non-zero, `ok:
+    /// false`), even though real, correct deletion happened.
     static func destroy(
         selected: [RawEvent], deleteAttempts: Int = 3, vacuumAttempts: Int = 3,
         sleep: (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
         delete: ([Int64]) async throws -> Int,
-        vacuum: () async throws -> Void
-    ) async throws -> DestroyOutcome {
+        vacuum: () async throws -> Void,
+        checkpoint: () async throws -> Bool
+    ) async throws -> Result {
         let matched = selected.count
         let deleted: Int
         do {
@@ -189,46 +240,72 @@ struct PurgeCommand: AsyncParsableCommand {
                 delete: delete)
         } catch let failure as PartialDeleteFailure {
             guard isLockedError(failure.underlying) else { throw failure.underlying }
+            // F2: a partial delete still leaves real, deleted-but-unreclaimed content behind —
+            // attempt to reclaim it too, and say plainly whether that succeeded.
+            let (reclaimed, detail) = await attemptVacuumAndCheckpoint(
+                attempts: vacuumAttempts, sleep: sleep, vacuum: vacuum, checkpoint: checkpoint)
             throw CLIError(
                 code: "database_locked",
-                message: lockedMessage(failure: failure, matched: matched),
+                message: lockedMessage(
+                    failure: failure, matched: matched, reclaimed: reclaimed, detail: detail),
                 hint: "Wait for other openrhyme activity to finish, then re-run purge",
-                exitCode: 1)
+                exitCode: 1,
+                data: purgeData(matched: matched, deleted: failure.deleted, vacuumed: reclaimed))
         }
 
-        do {
-            try await retryOnBusy(attempts: vacuumAttempts, sleep: sleep) { try await vacuum() }
-        } catch {
-            return DestroyOutcome(
-                result: Result(matched: matched, deleted: deleted, vacuumed: false, dryRun: false),
-                vacuumWarning: vacuumFailureWarning(
-                    deleted: deleted, matched: matched, error: error)
-            )
+        let (reclaimed, detail) = await attemptVacuumAndCheckpoint(
+            attempts: vacuumAttempts, sleep: sleep, vacuum: vacuum, checkpoint: checkpoint)
+        guard reclaimed else {
+            throw CLIError(
+                code: "vacuum_incomplete",
+                message: incompleteVacuumMessage(
+                    deleted: deleted, matched: matched, detail: detail),
+                hint:
+                    "Re-run `openrhyme purge` (with --yes) to retry, or run `sqlite3 <database> "
+                    + "'VACUUM; PRAGMA wal_checkpoint(TRUNCATE);'` directly",
+                exitCode: 1,
+                data: purgeData(matched: matched, deleted: deleted, vacuumed: false))
         }
-        return DestroyOutcome(
-            result: Result(matched: matched, deleted: deleted, vacuumed: true, dryRun: false),
-            vacuumWarning: nil)
+        return Result(matched: matched, deleted: deleted, vacuumed: true, dryRun: false)
     }
 
-    private static func lockedMessage(failure: PartialDeleteFailure, matched: Int) -> String {
+    private static func purgeData(matched: Int, deleted: Int, vacuumed: Bool) -> JSONValue {
+        [
+            "matched": .number(Double(matched)), "deleted": .number(Double(deleted)),
+            "vacuumed": .bool(vacuumed),
+        ]
+    }
+
+    private static func lockedMessage(
+        failure: PartialDeleteFailure, matched: Int, reclaimed: Bool, detail: String
+    ) -> String {
         guard failure.deleted > 0 else {
             return
                 "The database stayed locked after retrying; none of the \(matched) matching "
                 + "row(s) were deleted. Nothing changed."
         }
         let remaining = matched - failure.deleted
-        return
+        let base =
             "The database stayed locked after retrying: \(failure.deleted) of \(matched) "
             + "matching row(s) were deleted before that, but \(remaining) row(s) were not. "
             + "Re-run purge to finish removing the rest."
+        guard !reclaimed else { return base }
+        return
+            base
+            + " Rows already removed from the table may still be recoverable on disk until a "
+            + "successful VACUUM (\(detail))."
     }
 
-    private static func vacuumFailureWarning(deleted: Int, matched: Int, error: Error) -> String {
-        "warning: purge deleted \(deleted) of \(matched) matching row(s), but VACUUM did not "
-            + "complete (\(error)). That deleted content is NOT actually removed from disk yet — "
-            + "it can still be recovered from SQLite's free pages until a VACUUM succeeds. "
-            + "Re-run `openrhyme purge` (with --yes) to retry the VACUUM, or run "
-            + "`sqlite3 <database> VACUUM` directly."
+    private static func incompleteVacuumMessage(
+        deleted: Int, matched: Int, detail: String
+    )
+        -> String
+    {
+        "purge deleted \(deleted) of \(matched) matching row(s), but VACUUM did not complete: "
+            + "\(detail). That deleted content is NOT actually removed from disk yet — it can "
+            + "still be recovered until a VACUUM and checkpoint succeed. Re-run `openrhyme "
+            + "purge` (with --yes) to retry, or run `sqlite3 <database> 'VACUUM; PRAGMA "
+            + "wal_checkpoint(TRUNCATE);'` directly."
     }
 
     func run() async throws {
@@ -237,7 +314,10 @@ struct PurgeCommand: AsyncParsableCommand {
             // same envelope/exit-code path as every other usage error, in both --json and human
             // mode. `--all` and an empty filter set are deliberately not the same thing: with no
             // filters at all, purging everything must be asked for explicitly.
-            guard all || since != nil || app != nil || urlContains != nil || applyRules else {
+            guard
+                all || since != nil || until != nil || app != nil || urlContains != nil
+                    || applyRules
+            else {
                 throw CLIError.usage(
                     "Specify what to purge: --since/--until, --app, --url-contains, --apply-rules, or --all"
                 )
@@ -255,7 +335,9 @@ struct PurgeCommand: AsyncParsableCommand {
                         + "write events concurrently with this purge; proceeding anyway")
             }
 
-            let store = try EventStore(url: paths.databaseURL, readOnly: false)
+            // A dry run must be genuinely read-only: opening read-write would create the
+            // database (and its directory) even when nothing exists yet to report on.
+            let store = try EventStore(url: paths.databaseURL, readOnly: dryRun)
             let sinceTS = try since.map { try TimeSpec.parse($0) } ?? 0
             let untilTS = try until.map { try TimeSpec.parse($0) }
             let candidates = try await Self.fetchAllCandidates(
@@ -276,13 +358,13 @@ struct PurgeCommand: AsyncParsableCommand {
                     exitCode: 2)
             }
 
-            let outcome = try await Self.destroy(
+            let result = try await Self.destroy(
                 selected: selected,
                 delete: { try await store.deleteEvents(ids: $0) },
-                vacuum: { try await store.vacuum() })
-            if let warning = outcome.vacuumWarning { Output.stderr(warning) }
+                vacuum: { try await store.vacuum() },
+                checkpoint: { try await store.checkpointTruncate() })
             await store.close()
-            return outcome.result
+            return result
         }
     }
 
@@ -290,6 +372,9 @@ struct PurgeCommand: AsyncParsableCommand {
         if result.dryRun {
             return "\(result.matched) row(s) would be deleted (dry run; nothing changed)"
         }
+        // `destroy` throws rather than returning when reclaiming didn't fully complete, so a
+        // `Result` reaching here always has `vacuumed == true` — this stays defensive rather
+        // than assuming that invariant.
         guard result.vacuumed else {
             return
                 "deleted \(result.deleted) of \(result.matched) matching row(s) — WARNING: "

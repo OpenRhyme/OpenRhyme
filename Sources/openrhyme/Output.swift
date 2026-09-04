@@ -9,12 +9,20 @@ struct CLIError: Error {
     let message: String
     let hint: String?
     let exitCode: Int32
+    /// Structured detail alongside the error, e.g. `purge`'s `{matched, deleted, vacuumed}` when
+    /// it fails partway through: a script reading `ok: false` should not also have to guess what
+    /// state that left the store in. `nil` for every other error, so their JSON is unchanged.
+    let data: JSONValue?
 
-    init(code: String, message: String, hint: String? = nil, exitCode: Int32 = 1) {
+    init(
+        code: String, message: String, hint: String? = nil, exitCode: Int32 = 1,
+        data: JSONValue? = nil
+    ) {
         self.code = code
         self.message = message
         self.hint = hint
         self.exitCode = exitCode
+        self.data = data
     }
 
     static let notTrusted = CLIError(
@@ -53,6 +61,7 @@ private struct ErrorBody: Encodable {
     let code: String
     let message: String
     let hint: String?
+    let data: JSONValue?
 }
 
 private struct Envelope<T: Encodable>: Encodable {
@@ -81,7 +90,8 @@ enum Output {
     static func envelope(_ error: CLIError) -> String {
         let body = Envelope<String>(
             ok: false, data: nil,
-            error: ErrorBody(code: error.code, message: error.message, hint: error.hint))
+            error: ErrorBody(
+                code: error.code, message: error.message, hint: error.hint, data: error.data))
         return String(
             decoding: (try? jsonEncoder.encode(body)) ?? Data("{\"ok\":false}".utf8), as: UTF8.self)
     }

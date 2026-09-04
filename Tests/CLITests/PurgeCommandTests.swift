@@ -144,6 +144,54 @@ import Testing
         #expect(calls == 1, "a non-lock error must surface immediately")
     }
 
+    /// F7: `1...attempts` traps when `attempts` is 0 (or negative) — an invalid `ClosedRange`.
+    /// Zero/negative attempts must still try at least once rather than crashing the process.
+    @Test func retryOnBusyDoesNotTrapWhenAttemptsIsZeroOrNegative() async throws {
+        for attempts in [0, -1] {
+            var calls = 0
+            await #expect(throws: DatabaseError.self) {
+                try await PurgeCommand.retryOnBusy(attempts: attempts, sleep: noSleep) {
+                    calls += 1
+                    throw locked()
+                }
+            }
+            #expect(calls == 1)
+        }
+    }
+
+    @Test func retryUntilTrueSucceedsAfterTransientBusyReturns() async throws {
+        var calls = 0
+        let result = try await PurgeCommand.retryUntilTrue(attempts: 3, sleep: noSleep) {
+            calls += 1
+            return calls == 3
+        }
+        #expect(result)
+        #expect(calls == 3)
+    }
+
+    @Test func retryUntilTrueGivesUpAfterExhaustingAttemptsWithoutThrowing() async throws {
+        var calls = 0
+        let result = try await PurgeCommand.retryUntilTrue(attempts: 3, sleep: noSleep) {
+            calls += 1
+            return false
+        }
+        #expect(!result)
+        #expect(calls == 3, "must not retry forever")
+    }
+
+    /// F7, same trap, for the boolean-signaled retry helper.
+    @Test func retryUntilTrueDoesNotTrapWhenAttemptsIsZeroOrNegative() async throws {
+        for attempts in [0, -1] {
+            var calls = 0
+            let result = try await PurgeCommand.retryUntilTrue(attempts: attempts, sleep: noSleep) {
+                calls += 1
+                return false
+            }
+            #expect(!result)
+            #expect(calls == 1)
+        }
+    }
+
     @Test func deleteWithRetryRecoversFromATransientLockWithoutLosingCount() async throws {
         var attemptsForFirstChunk = 0
         let deleted = try await PurgeCommand.deleteWithRetry(
@@ -178,37 +226,65 @@ import Testing
         }
     }
 
-    @Test func destroyReturnsVacuumedFalseAndAWarningWhenVacuumNeverRecovers() async throws {
+    /// F1/F3: a delete that fully succeeds but whose VACUUM/checkpoint never completes is a
+    /// *failed* purge (throws, `ok: false`), not a soft success — the deleted rows' plaintext
+    /// content is still recoverable on disk until a VACUUM+checkpoint actually lands.
+    @Test func destroyThrowsAVacuumIncompleteErrorWithCountsWhenReclaimingNeverCompletes()
+        async throws
+    {
         let event = RawEvent(id: 1, ts: 0, kind: .contextSnapshot)
-        let outcome = try await PurgeCommand.destroy(
-            selected: [event], deleteAttempts: 2, vacuumAttempts: 2, sleep: noSleep,
-            delete: { $0.count },
-            vacuum: { throw self.locked() })
-        #expect(outcome.result.deleted == 1)
-        #expect(outcome.result.matched == 1)
-        #expect(!outcome.result.vacuumed)
-        #expect(!outcome.result.dryRun)
-        let warning = try #require(outcome.vacuumWarning)
-        #expect(warning.lowercased().contains("vacuum"))
-        #expect(warning.contains("1"))
-        // Never claim an unqualified success.
-        let human = PurgeCommand.humanLines(outcome.result)
-        #expect(human.contains("WARNING"))
-        #expect(human.contains("VACUUM did not complete"))
+        do {
+            _ = try await PurgeCommand.destroy(
+                selected: [event], deleteAttempts: 2, vacuumAttempts: 2, sleep: noSleep,
+                delete: { $0.count },
+                vacuum: { throw self.locked() },
+                checkpoint: { true })
+            Issue.record("expected destroy to throw")
+        } catch let error as CLIError {
+            #expect(error.code == "vacuum_incomplete")
+            #expect(error.exitCode == 1)
+            #expect(error.message.lowercased().contains("vacuum"))
+            #expect(error.message.contains("1"))
+            let data = try #require(error.data?.objectValue)
+            #expect(data["matched"]?.doubleValue == 1)
+            #expect(data["deleted"]?.doubleValue == 1)
+            #expect(data["vacuumed"]?.boolValue == false)
+        }
     }
 
-    @Test func destroyReportsVacuumedTrueWhenBothStepsSucceed() async throws {
+    /// The checkpoint half of reclaiming: VACUUM itself can succeed while the checkpoint stays
+    /// busy (its contention signal is a returned `false`, not a thrown error) — that must be
+    /// treated exactly the same as a VACUUM failure, never reported as a success.
+    @Test func destroyThrowsWhenVacuumSucceedsButCheckpointStaysBusy() async throws {
         let event = RawEvent(id: 1, ts: 0, kind: .contextSnapshot)
-        let outcome = try await PurgeCommand.destroy(
+        do {
+            _ = try await PurgeCommand.destroy(
+                selected: [event], vacuumAttempts: 2, sleep: noSleep,
+                delete: { $0.count },
+                vacuum: {},
+                checkpoint: { false })
+            Issue.record("expected destroy to throw")
+        } catch let error as CLIError {
+            #expect(error.code == "vacuum_incomplete")
+            #expect(error.data?.objectValue?["vacuumed"]?.boolValue == false)
+            #expect(error.message.contains("checkpoint"))
+        }
+    }
+
+    @Test func destroyReportsVacuumedTrueWhenDeleteVacuumAndCheckpointAllSucceed() async throws {
+        let event = RawEvent(id: 1, ts: 0, kind: .contextSnapshot)
+        let result = try await PurgeCommand.destroy(
             selected: [event], sleep: noSleep,
             delete: { $0.count },
-            vacuum: {})
-        #expect(outcome.result.deleted == 1)
-        #expect(outcome.result.vacuumed)
-        #expect(outcome.vacuumWarning == nil)
+            vacuum: {},
+            checkpoint: { true })
+        #expect(result.deleted == 1)
+        #expect(result.matched == 1)
+        #expect(result.vacuumed)
+        #expect(!result.dryRun)
         #expect(
-            PurgeCommand.humanLines(outcome.result)
-                == "deleted 1 of 1 matching row(s); database vacuumed")
+            PurgeCommand.humanLines(result) == "deleted 1 of 1 matching row(s); database vacuumed"
+        )
     }
 
     @Test func destroyThrowsALockedCLIErrorWhenDeleteNeverRecovers() async throws {
@@ -217,13 +293,47 @@ import Testing
             _ = try await PurgeCommand.destroy(
                 selected: events, deleteAttempts: 2, sleep: noSleep,
                 delete: { _ in throw self.locked() },
-                vacuum: {})
+                vacuum: {},
+                checkpoint: { true })
             Issue.record("expected destroy to throw")
         } catch let error as CLIError {
             #expect(error.code == "database_locked")
             #expect(error.exitCode == 1)
             #expect(error.message.lowercased().contains("locked"))
             #expect(error.message.contains("none"))
+            let data = try #require(error.data?.objectValue)
+            #expect(data["matched"]?.doubleValue == 3)
+            #expect(data["deleted"]?.doubleValue == 0)
+        }
+    }
+
+    /// F2: the partial-delete path must also attempt to reclaim whatever it did delete, and say
+    /// so plainly when that reclaim itself doesn't complete — never just "re-run to finish" with
+    /// no mention that already-deleted content may still be sitting on disk.
+    @Test func partialDeleteAlsoAttemptsToReclaimAndSaysSoWhenThatFails() async throws {
+        var deleteCalls = 0
+        let ids = Array(1...600)
+        let events = ids.map { RawEvent(id: Int64($0), ts: 0, kind: .contextSnapshot) }
+        do {
+            _ = try await PurgeCommand.destroy(
+                selected: events, deleteAttempts: 2, vacuumAttempts: 2, sleep: noSleep,
+                delete: { chunk in
+                    deleteCalls += 1
+                    if deleteCalls == 1 { return chunk.count }  // first 500-row chunk succeeds
+                    throw self.locked()  // second chunk never recovers
+                },
+                vacuum: {},
+                checkpoint: { false }  // reclaim of the 500 already-deleted rows never completes
+            )
+            Issue.record("expected destroy to throw")
+        } catch let error as CLIError {
+            #expect(error.code == "database_locked")
+            #expect(error.message.contains("500"))
+            #expect(error.message.lowercased().contains("recoverable"))
+            let data = try #require(error.data?.objectValue)
+            #expect(data["matched"]?.doubleValue == 600)
+            #expect(data["deleted"]?.doubleValue == 500)
+            #expect(data["vacuumed"]?.boolValue == false)
         }
     }
 
@@ -309,6 +419,39 @@ import Testing
         #expect(error?["code"] as? String == "usage")
     }
 
+    /// F4: the usage guard advertises `--since/--until` as valid ways to specify what to purge,
+    /// but only checked `since` — `--until` alone was wrongly refused as if no filter was given.
+    @Test func untilAloneIsAcceptedNotRefusedAsMissingFilters() async throws {
+        let (_, env) = try await seeded()
+        let result = try CLIRunner.run(
+            ["purge", "--until", "9999999999", "--dry-run", "--json"], env: env)
+        #expect(result.status == 0, "\(result.stderr)")
+        let data = try CLIRunner.json(result.stdout)["data"] as? [String: Any]
+        #expect(data?["matched"] as? Int == 2)
+    }
+
+    /// R17: a read-only operation must not create state. Before this fix, `--dry-run` opened the
+    /// store read-write (creating an empty database and its directory) even when nothing existed
+    /// yet to report on.
+    @Test func dryRunAgainstAMissingDatabaseDoesNotCreateOne() async throws {
+        let dir = try CLIRunner.tempDataDir()
+        let dbURL = dir.appendingPathComponent("events.sqlite")
+        #expect(!FileManager.default.fileExists(atPath: dbURL.path))
+
+        let result = try CLIRunner.run(
+            ["purge", "--since", "0", "--all", "--dry-run", "--json"],
+            env: ["OPENRHYME_DATA_DIR": dir.path])
+        // A read-only operation against a store that doesn't exist yet is a stable error,
+        // matching `events`/`export`'s existing behavior for a missing database — never a
+        // silent, state-creating "0 matched".
+        #expect(result.status == 1)
+        let error = try CLIRunner.json(result.stdout)["error"] as? [String: Any]
+        #expect(error?["code"] as? String == "db_not_found")
+        #expect(
+            !FileManager.default.fileExists(atPath: dbURL.path),
+            "a dry run must never create the database")
+    }
+
     @Test func allDeletesEverythingInRange() async throws {
         let (dir, env) = try await seeded()
         let result = try CLIRunner.run(
@@ -372,12 +515,93 @@ import Testing
         #expect(envelope["ok"] as? Bool == false)
         let error = envelope["error"] as? [String: Any]
         #expect((error?["message"] as? String)?.lowercased().contains("locked") == true)
+        // F2/F3: the error payload carries the real counts, not just a message.
+        let data = error?["data"] as? [String: Any]
+        #expect(data?["matched"] as? Int == 2)
+        #expect(data?["deleted"] as? Int == 0)
+        #expect(data?["vacuumed"] as? Bool == false)
 
         // The locker's write transaction is still open: a fresh read-only connection can still
         // see the pre-purge snapshot, proving nothing was actually removed.
         let stillThere = try EventStore(url: dbURL, readOnly: true)
         #expect(try await stillThere.count() == 2)
         await stillThere.close()
+    }
+
+    /// F1 — CRITICAL, and the mandatory regression test for it. In WAL mode `VACUUM` rewrites
+    /// the database *into the WAL*; `events.sqlite` only receives it at a checkpoint, and the
+    /// checkpoint that normally does this runs only when the *last* connection closes. A second
+    /// connection held open here (exactly what a running daemon looks like) means purge's own
+    /// close is never last — so this reproduces the exact defect: without an explicit checkpoint
+    /// after VACUUM, deleted content's plaintext survives in `events.sqlite` indefinitely. Every
+    /// prior vacuum assertion in this file only checked the reported `vacuumed` flag, never the
+    /// actual bytes on disk — that is exactly where this hid.
+    @Test
+    func purgeChecksPointsSoDeletedContentActuallyLeavesTheMainFileWithAHolderConnectionOpen()
+        async throws
+    {
+        let dir = try CLIRunner.tempDataDir()
+        let dbURL = dir.appendingPathComponent("events.sqlite")
+        let marker = "MARKERSTRING\(UUID().uuidString.prefix(8))"
+        let store = try EventStore(url: dbURL)
+        for i in 0..<200 {
+            try await store.append(
+                RawEvent(
+                    ts: Double(i), kind: .contextSnapshot, bundleID: "com.apple.Safari",
+                    windowTitle: "\(marker)_\(i)"))
+        }
+        await store.close()
+        #expect(try Data(contentsOf: dbURL).range(of: Data(marker.utf8)) != nil)
+
+        // Hold a second connection open for the rest of the test — this is what makes the bug
+        // reproduce.
+        let holder = try Database(url: dbURL, mode: .readWrite)
+        defer { holder.close() }
+
+        let result = try CLIRunner.run(
+            ["purge", "--since", "0", "--all", "--yes", "--json"],
+            env: ["OPENRHYME_DATA_DIR": dir.path])
+        #expect(result.status == 0, "\(result.stderr)")
+        let data = try CLIRunner.json(result.stdout)["data"] as? [String: Any]
+        #expect(data?["deleted"] as? Int == 200)
+        #expect(data?["vacuumed"] as? Bool == true)
+
+        let bytesAfter = try Data(contentsOf: dbURL)
+        #expect(
+            bytesAfter.range(of: Data(marker.utf8)) == nil,
+            "deleted content's marker string must not survive in events.sqlite while a second connection is still open"
+        )
+    }
+
+    /// F3: rows genuinely deleted but never reclaimed from disk is a *failed* purge — `ok: false`
+    /// and non-zero exit — not a soft success, because "I deleted the rows but left the
+    /// plaintext on disk" fails the point of the command. An open, *active* read transaction
+    /// (not merely an open connection — confirmed empirically) is what blocks a checkpoint
+    /// without blocking the DELETE/VACUUM themselves, so this reproduces exactly that split.
+    @Test func vacuumIncompleteIsReportedAsAFailedPurgeEvenThoughRowsWereDeleted() async throws {
+        let (dir, env) = try await seeded()
+        let dbURL = dir.appendingPathComponent("events.sqlite")
+
+        let holder = try Database(url: dbURL, mode: .readWrite)
+        try holder.exec("BEGIN")
+        let cursor = try holder.prepare("SELECT * FROM events")
+        while try cursor.step() {}
+        defer {
+            try? holder.exec("COMMIT")
+            holder.close()
+        }
+
+        let result = try CLIRunner.run(
+            ["purge", "--since", "0", "--all", "--yes", "--json"], env: env)
+        #expect(result.status != 0)
+        let envelope = try CLIRunner.json(result.stdout)
+        #expect(envelope["ok"] as? Bool == false)
+        let error = envelope["error"] as? [String: Any]
+        #expect(error?["code"] as? String == "vacuum_incomplete")
+        let data = error?["data"] as? [String: Any]
+        #expect(data?["matched"] as? Int == 2)
+        #expect(data?["deleted"] as? Int == 2)
+        #expect(data?["vacuumed"] as? Bool == false)
     }
 
     // MARK: - Live daemon (requirement: warn, never refuse)
