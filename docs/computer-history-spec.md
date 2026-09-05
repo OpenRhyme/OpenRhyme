@@ -94,7 +94,19 @@ Also noted (write-path, less relevant to read-only capture but worth knowing): `
 
 ---
 
-## 6. Architecture (agreed)
+## 6. Architecture (agreed — **§6, §6.1 and §6.2 are now SUPERSEDED**)
+
+> **Superseded 2026-09-04 by `docs/superpowers/specs/2026-09-04-semantic-layer-design.md`.**
+>
+> The HOT/WARM/COLD storage tiers were never built and are now retired, as is the deterministic `Compact` layer §6.2 proposed (`Sources/Compact` never grew past a placeholder). What replaced them, and why:
+>
+> - **The premise did not survive contact with the data.** Part 1 measured ~100K rows per workday (~80 MB); SQLite handles that with no pressure, so tiering solved a storage problem that does not exist. Sessionization turned out to be a query-time concern, not a storage one.
+> - **One events table is the source of truth.** No rollup job, no WARM/COLD migration, no archive.
+> - **The rollup moved out of this repo.** A companion `semantic.sqlite`, built asynchronously by the Python MCP server's consolidation worker, holds LLM-extracted facts, entities and session summaries. The Swift engine stays inference-free.
+> - **§6.1 survives intact.** "Segment by activity coherence, not fixed time windows" is still a non-negotiable; idle-gap detection is how it is implemented (semantic layer design §11.1).
+> - **§6.3 survives intact.** Hybrid retrieval — full text plus embeddings — is exactly what the new design specifies.
+>
+> Everything below is kept as the record of *why the tiers were considered*, not as a description of what is built. Read it as history.
 
 Three-tier, same shape as observability tooling (Loki/Tempo pattern):
 
@@ -107,6 +119,8 @@ COLD   raw logs on disk, drilled into on demand, auto-cleanup
 ```
 
 Agents read the warm tier by default and drill into cold only when they need specifics.
+
+*(Superseded: there is one tier. Agents read raw events through the CLI, and — once the semantic layer ships — sessions, search and facts through the MCP server.)*
 
 ### 6.1 Rollup boundary matters more than storage
 Do **not** summarize by fixed time window — it shreds a task that spans lunch. Segment by **activity coherence** (bursts of related app/file/window switches). Harder, materially better output.
@@ -125,6 +139,8 @@ Not a bundled background LLM. Follow the **Hermes-style approach**: whatever age
 This alone should cut volume by roughly an order of magnitude. The semantic summary then becomes a thin *optional* layer on top. If it's stale, the compacted events are still small enough to hand an agent directly.
 
 → **The fallback is not a bundled model. The fallback is just less prose.**
+
+*(Superseded in mechanism, kept in spirit: the deterministic layer was never built, because measurement showed the volume did not need reducing. The "no bundled model in the capture path" half of this reasoning is stronger than ever and is still a non-negotiable — the daemon holds the Accessibility grant. The prose now comes from a local model in a separate, unprivileged process in the Python repo, which reads only the redacted CLI projection.)*
 
 ### 6.3 Retrieval
 **Hybrid: full-text search over the archive + embeddings.** Not pure vector. Exact-term matching matters enormously here — filenames, error strings, function names, ticket IDs.
