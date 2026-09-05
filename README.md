@@ -2,7 +2,7 @@
 
 An open-source, local-first **computer history layer for macOS** — a daemon that turns what you do on your Mac into a private, searchable timeline that *any* AI agent can read.
 
-> **Status:** Part 1 of the MVP is implemented on this branch — the capture daemon and the `openrhyme` CLI, against the settled design ([spec](docs/computer-history-spec.md)). The MCP server and the WARM/COLD storage tiers are still ahead.
+> **Status:** Part 1 of the MVP is implemented — the capture daemon and the `openrhyme` CLI. The [MCP server](https://github.com/OpenRhyme/openrhyme-mcp) is also implemented. The original WARM/COLD storage tiers are superseded by the [semantic layer design](/docs/superpowers/specs/2026-09-04-semantic-layer-design.md): a companion semantic SQLite built asynchronously by a local LLM over the single HOT source of truth.
 
 ## Why
 
@@ -19,35 +19,40 @@ OpenRhyme is the same capability with the ownership flipped:
 
 ```
  ┌───────────────────────── this repo (Swift engine) ─────────────────────────┐
- │                                                                            │
- │  Capture ──raw events──▶ Store (HOT) ──▶ Compact ──▶ Store (WARM / COLD)   │
- │  AX observers,           ~1 day raw      deterministic:                    │
- │  listen-only event tap   SQLite          sessionize · dedup · drop idle    │
- │                                          · collapse repeats (no LLM)       │
- └───────────────────────────────────┬────────────────────────────────────────┘
-                                     │  SQLite read-only  +  `openrhyme … --json`
-                                     ▼
-                    openrhyme-mcp  (Python, github.com/OpenRhyme/openrhyme-mcp)
-                    thin MCP server over stdio, usable by any agent
+ │                                                                             │
+ │  Capture ──raw events──▶ events.sqlite (single source of truth)            │
+ │  AX observers,           searchable by CLI --json                           │
+ │  listen-only event tap                                                      │
+ └──────────────────────────────────┬──────────────────────────────────────────┘
+                                    │  SQLite read-only  +  `openrhyme … --json`
+                                    ▼
+                   openrhyme-mcp  (Python, github.com/OpenRhyme/openrhyme-mcp)
+                    │
+                    ├── sessions (idle-gap, no LLM)
+                    ├── search (FTS5 + vectors + RRF, on-device)
+                    ├── consolidate (async, local LLM → semantic.sqlite)
+                    └── ask (RAG over semantic store + raw events)
 ```
 
-Key design choices (reasoning in the spec):
+Key design choices (reasoning in the spec and the [semantic layer design](/docs/superpowers/specs/2026-09-04-semantic-layer-design.md)):
 
-- Three tiers, Loki/Tempo-style: HOT raw → WARM session summaries → COLD archive. Agents read WARM by default and drill into COLD on demand.
-- Rollup boundaries follow **activity coherence**, not fixed time windows — a task that spans lunch stays one task.
-- **No bundled LLM.** A deterministic layer (`Compact`) does the ~10× volume reduction; whatever agent you already use adds prose on top. If the prose is stale, the fallback is *less prose*, not a background model.
-- Retrieval is hybrid: full-text search over the archive plus embeddings. Filenames, error strings and ticket IDs need exact matching.
+- **One HOT source of truth.** No WARM/COLD storage tiers. SQLite handles ~100K events/day with no pressure. A companion semantic store is built asynchronously by a local LLM, always rebuildable from the raw events.
+- Session boundaries follow **activity coherence** (idle-gap detection), not fixed time windows.
+- **No bundled LLM.** The capture daemon never calls a model. LLM work happens in a separate consolidation worker (launchd agent, no TCC grants) that reads through the CLI, same as every other consumer.
+- Retrieval is **hybrid**: FTS5 for exact terms + dense embeddings for semantic match, fused by Reciprocal Rank Fusion.
 
 ## Repository layout
 
 | Path | What |
 |---|---|
+| Path | What |
+|---|---|---|
 | `Sources/Capture` | Accessibility + input-activity capture (macOS only) |
-| `Sources/Store` | SQLite tiers; the schema is the contract other processes read |
-| `Sources/Compact` | Inference-free sessionization / dedup / idle dropping |
-| `Sources/openrhyme` | The executable: `daemon`, `status`, `apps`, `inspect`, `events`, `export`, `version` |
+| `Sources/Store` | SQLite event store; the schema is the contract other processes read |
+| `Sources/openrhyme` | The executable: `daemon`, `status`, `apps`, `inspect`, `events`, `export`, `sessions`, `version` |
 | `Tests/*` | One test target per module |
-| `docs/computer-history-spec.md` | The research & design spec — read this first |
+| `docs/computer-history-spec.md` | The original research & design spec |
+| `docs/superpowers/specs/2026-09-04-semantic-layer-design.md` | The semantic layer design (supersedes WARM/COLD) |
 | `docs/accessibility-api.md` | The macOS Accessibility API from a capture daemon's point of view |
 | `docs/engine-interface.md` | Process topology and how the Python MCP server drives the engine |
 
@@ -81,18 +86,18 @@ Capture is event-driven: app, window, element and title changes, typing (debounc
 
 The daemon needs the **Accessibility** grant. When launched from a terminal, macOS attributes the request to the terminal app, so grant it to Terminal/iTerm (System Settings → Privacy & Security → Accessibility). `openrhyme inspect` shows exactly what the daemon can see for the frontmost app. Ad-hoc-signed `swift build` binaries lose the grant on every rebuild — read `docs/accessibility-api.md` §2 before trying.
 
-## Roadmap and open questions
+## What's next
 
-From spec §9:
+The capture daemon and MCP server are built. The semantic layer adds retrieval and reasoning:
 
-1. First slice — capture daemon alone, or capture + MCP so an agent can query it on day one?
-2. ~~Daemon language~~ → **Swift** (decided 2026-09-01). MCP server → **Python**, [OpenRhyme/openrhyme-mcp](https://github.com/OpenRhyme/openrhyme-mcp).
-3. Sessionization signals — app switch? idle threshold? file/project change? a scored combination?
-4. Per-app allowlist UX.
-5. Retention defaults and cold-tier TTL.
-6. Proving local-only to a skeptical user (no network entitlement, auditable build).
+| Phase | What | LLM cost | Delivers |
+|---|---|---|---|
+| **0** | Sessionize — idle-gap detection, `openrhyme sessions` CLI, MCP `sessions` tool | None | Agents see activity units, not raw logs |
+| **1** | Hybrid search — FTS5 + on-device embeddings + RRF, MCP `search` tool | None | "Find the error from last week" works |
+| **2** | Semantic consolidation — background LLM extracts facts/summaries, MCP `facts`/`ask` | ~30 calls/day | Agent knows your projects, patterns, decisions |
+| **3** | Knowledge graph — entity resolution, edge derivation, BFS traversal | None (reuses Phase 2) | Multi-hop: "What was I doing before debugging X?" |
 
-Next concrete step (spec §10): read [OpenHistory](https://github.com/ztratar/openhistory)'s issue tracker before writing capture code.
+Details in the [semantic layer design](docs/superpowers/specs/2026-09-04-semantic-layer-design.md) and the implementation plans under `docs/superpowers/plans/`.
 
 ## Prior art
 
