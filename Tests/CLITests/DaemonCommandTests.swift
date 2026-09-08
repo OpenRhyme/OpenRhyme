@@ -16,11 +16,16 @@ private final class TestBox<Value>: @unchecked Sendable {
     init(_ value: Value) { self.value = value }
 }
 
-// `.serialized`: this suite spawns several real daemon subprocesses (one or more per test).
-// Left to run in parallel with the rest of the suite, the combined CPU/scheduling load was
-// observed to expose a pre-existing, unrelated timing race in `ObserverTests` (a different,
-// untouched file) under a full `swift test` run — never reproduced when either suite ran alone.
-// Serializing this suite's own tests bounds how many daemon subprocesses are ever live at once.
+// `.serialized`: this suite spawns several real daemon subprocesses (one or more per test), and
+// serializing bounds how many are ever live at once.
+//
+// It was originally added because this suite's load "exposed a pre-existing, unrelated timing
+// race in `ObserverTests`". That diagnosis was wrong, and serializing was never the cure: the
+// two suites were not racing over anything, and CI run 33940108336 failed the same way with
+// this attribute in place — including a test *in this suite*. The real mechanism is thread
+// starvation of the Swift cooperative pool by blocking subprocess waits, which stops
+// `Task.sleep` firing process-wide; it is documented in full on `CLIRunner.run` and fixed
+// there. `.serialized` is kept purely for the subprocess-count reason above.
 @Suite(.serialized) struct DaemonCommandTests {
     private func launchDaemon(dataDir: URL) throws -> Process {
         let process = Process()
@@ -98,25 +103,36 @@ private final class TestBox<Value>: @unchecked Sendable {
     /// Swift Testing body resumes on an arbitrary cooperative-pool thread after every `await`,
     /// so launching and stopping from two different threads deadlocks the whole test process
     /// indefinitely. Reproduced on an unmodified checkout of this suite; polling `isRunning`,
-    /// which the loop below already does, gives the same guarantee without the run loop —
+    /// which `waitForExit` does, gives the same guarantee without the run loop —
     /// `isRunning == false` means terminated and reaped, so `terminationStatus` is valid after.
+    /// That poll waits with `Task.sleep` rather than `usleep`, for the reason spelled out on
+    /// `CLIRunner.run`: a busy-wait would park a cooperative-pool thread for up to `timeout`,
+    /// and enough parked threads stop `Task.sleep` wakeups firing anywhere in the process.
     @discardableResult
-    private func stopDaemon(_ process: Process, timeout: TimeInterval = 10) -> Bool {
+    private func stopDaemon(_ process: Process, timeout: TimeInterval = 10) async -> Bool {
         guard process.isRunning else { return true }
         process.terminate()
+        if await waitForExit(process, timeout: timeout) { return true }
+        kill(process.processIdentifier, SIGKILL)
+        _ = await waitForExit(process, timeout: timeout)
+        return false
+    }
+
+    private func waitForExit(_ process: Process, timeout: TimeInterval) async -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         while process.isRunning && Date() < deadline {
-            usleep(20_000)
+            try? await Task.sleep(for: .milliseconds(20))
         }
-        guard !process.isRunning else {
-            kill(process.processIdentifier, SIGKILL)
-            let killDeadline = Date().addingTimeInterval(timeout)
-            while process.isRunning && Date() < killDeadline {
-                usleep(20_000)
-            }
-            return false
-        }
-        return true
+        return !process.isRunning
+    }
+
+    /// A leak guard for `defer`, which cannot `await`: signals the daemon and returns at once.
+    /// Foundation reaps the child on its own, so nothing here has to wait for it — and waiting
+    /// is exactly what must not happen on a cooperative-pool thread. Tests that assert a clean
+    /// exit use `stopDaemon` instead.
+    private func terminateDaemon(_ process: Process) {
+        guard process.isRunning else { return }
+        process.terminate()
     }
 
     @Test func startsWritesPidfileAndStopsCleanlyOnSIGTERM() async throws {
@@ -124,7 +140,7 @@ private final class TestBox<Value>: @unchecked Sendable {
         let daemon = try launchDaemon(dataDir: dir)
         #expect(await waitForPIDFile(dir), "daemon did not write daemon.pid")
 
-        #expect(stopDaemon(daemon), "daemon did not exit within 10s of SIGTERM")
+        #expect(await stopDaemon(daemon), "daemon did not exit within 10s of SIGTERM")
         #expect(daemon.terminationStatus == 0)
         #expect(
             !FileManager.default.fileExists(atPath: dir.appendingPathComponent("daemon.pid").path))
@@ -141,10 +157,10 @@ private final class TestBox<Value>: @unchecked Sendable {
     @Test func secondDaemonIsRefused() async throws {
         let dir = try CLIRunner.tempDataDir()
         let first = try launchDaemon(dataDir: dir)
-        defer { stopDaemon(first) }
+        defer { terminateDaemon(first) }
         #expect(await waitForPIDFile(dir))
 
-        let second = try CLIRunner.run(
+        let second = try await CLIRunner.run(
             ["daemon", "--no-prompt", "--json"], env: ["OPENRHYME_DATA_DIR": dir.path])
         #expect(second.status == 1)
         #expect(
@@ -158,11 +174,11 @@ private final class TestBox<Value>: @unchecked Sendable {
     @Test func signalDuringStartupIsNotLost() async throws {
         let dir = try CLIRunner.tempDataDir()
         let daemon = try launchDaemon(dataDir: dir)
-        defer { stopDaemon(daemon) }
+        defer { terminateDaemon(daemon) }
         #expect(
             await waitForPIDFile(dir, poll: .milliseconds(1)), "daemon did not write daemon.pid")
 
-        #expect(stopDaemon(daemon), "daemon ignored a SIGTERM sent during startup")
+        #expect(await stopDaemon(daemon), "daemon ignored a SIGTERM sent during startup")
         #expect(daemon.terminationStatus == 0)
 
         let store = try EventStore(url: dir.appendingPathComponent("events.sqlite"), readOnly: true)
@@ -572,7 +588,7 @@ private final class TestBox<Value>: @unchecked Sendable {
         let daemon = try launchDaemon(dataDir: dir)
         #expect(await waitForPIDFile(dir), "daemon did not write daemon.pid")
         #expect(await waitForDaemonStarted(dir), "daemon did not record daemon.started")
-        #expect(stopDaemon(daemon), "daemon did not exit within 10s of SIGTERM")
+        #expect(await stopDaemon(daemon), "daemon did not exit within 10s of SIGTERM")
 
         let after = try EventStore(url: dbURL, readOnly: true)
         let events = try await after.query(EventQuery(since: 0))
@@ -615,7 +631,7 @@ private final class TestBox<Value>: @unchecked Sendable {
         let daemon = try launchDaemon(dataDir: dir)
         #expect(await waitForPIDFile(dir), "daemon did not write daemon.pid")
         #expect(await waitForDaemonStarted(dir), "daemon did not record daemon.started")
-        #expect(stopDaemon(daemon), "daemon did not exit within 10s of SIGTERM")
+        #expect(await stopDaemon(daemon), "daemon did not exit within 10s of SIGTERM")
 
         let store = try EventStore(
             url: dir.appendingPathComponent("events.sqlite"), readOnly: true)
@@ -645,7 +661,7 @@ private final class TestBox<Value>: @unchecked Sendable {
         let daemon = try launchDaemon(dataDir: dir)
         #expect(await waitForPIDFile(dir), "daemon did not write daemon.pid")
         #expect(await waitForDaemonStarted(dir), "daemon did not record daemon.started")
-        #expect(stopDaemon(daemon), "daemon did not exit within 10s of SIGTERM")
+        #expect(await stopDaemon(daemon), "daemon did not exit within 10s of SIGTERM")
 
         let store = try EventStore(
             url: dir.appendingPathComponent("events.sqlite"), readOnly: true)
@@ -676,7 +692,7 @@ private final class TestBox<Value>: @unchecked Sendable {
         let daemon = try launchDaemon(dataDir: dir)
         #expect(await waitForPIDFile(dir), "daemon did not write daemon.pid")
         #expect(await waitForDaemonStarted(dir), "daemon did not record daemon.started")
-        #expect(stopDaemon(daemon), "daemon did not exit within 10s of SIGTERM")
+        #expect(await stopDaemon(daemon), "daemon did not exit within 10s of SIGTERM")
 
         let after = try EventStore(url: dbURL, readOnly: true)
         let events = try await after.query(EventQuery(since: 0))
@@ -723,7 +739,7 @@ private final class TestBox<Value>: @unchecked Sendable {
         let daemon = try launchDaemon(dataDir: dir)
         #expect(await waitForPIDFile(dir), "daemon did not write daemon.pid")
         #expect(await waitForDaemonStarted(dir), "daemon did not record daemon.started")
-        #expect(stopDaemon(daemon), "daemon did not exit within 10s of SIGTERM")
+        #expect(await stopDaemon(daemon), "daemon did not exit within 10s of SIGTERM")
 
         let after = try EventStore(url: dbURL, readOnly: true)
         let events = try await after.query(EventQuery(since: 0))
@@ -764,7 +780,7 @@ private final class TestBox<Value>: @unchecked Sendable {
         let (daemon, stderr) = try launchDaemonCapturingStderr(dataDir: dir)
         #expect(await waitForPIDFile(dir), "daemon did not write daemon.pid")
         #expect(await waitForDaemonStarted(dir), "daemon did not record daemon.started")
-        #expect(stopDaemon(daemon), "daemon did not exit within 10s of SIGTERM")
+        #expect(await stopDaemon(daemon), "daemon did not exit within 10s of SIGTERM")
         let stderrText = String(
             decoding: stderr.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
 
@@ -813,7 +829,7 @@ private final class TestBox<Value>: @unchecked Sendable {
         let daemon = try launchDaemon(dataDir: dir)
         #expect(await waitForPIDFile(dir), "daemon did not write daemon.pid")
         #expect(await waitForDaemonStarted(dir), "daemon did not record daemon.started")
-        #expect(stopDaemon(daemon), "daemon did not exit within 10s of SIGTERM")
+        #expect(await stopDaemon(daemon), "daemon did not exit within 10s of SIGTERM")
 
         let after = try EventStore(url: dbURL, readOnly: true)
         let events = try await after.query(EventQuery(since: 0))
@@ -842,7 +858,7 @@ private final class TestBox<Value>: @unchecked Sendable {
         let (daemon, stderr) = try launchDaemonCapturingStderr(dataDir: dir)
         #expect(await waitForPIDFile(dir), "daemon did not write daemon.pid")
         #expect(await waitForDaemonStarted(dir), "daemon did not record daemon.started")
-        #expect(stopDaemon(daemon), "daemon did not exit within 10s of SIGTERM")
+        #expect(await stopDaemon(daemon), "daemon did not exit within 10s of SIGTERM")
         let stderrText = String(
             decoding: stderr.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
 
@@ -896,7 +912,7 @@ private final class TestBox<Value>: @unchecked Sendable {
         #expect(
             await waitForDaemonStarted(dir, atLeast: 2),
             "daemon did not record its own daemon.started")
-        #expect(stopDaemon(daemon), "daemon did not exit within 10s of SIGTERM")
+        #expect(await stopDaemon(daemon), "daemon did not exit within 10s of SIGTERM")
 
         let after = try EventStore(url: dbURL, readOnly: true)
         let events = try await after.query(EventQuery(since: 0))
@@ -943,7 +959,8 @@ private final class TestBox<Value>: @unchecked Sendable {
             #expect(
                 await waitForDaemonStarted(dir, atLeast: run + 1),
                 "run \(run): no daemon.started recorded for this run")
-            #expect(stopDaemon(daemon), "run \(run): daemon did not exit within 10s of SIGTERM")
+            #expect(
+                await stopDaemon(daemon), "run \(run): daemon did not exit within 10s of SIGTERM")
 
             let after = try EventStore(url: dbURL, readOnly: true)
             let events = try await after.query(EventQuery(since: 0))

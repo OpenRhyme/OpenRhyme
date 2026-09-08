@@ -22,7 +22,7 @@ import Testing
 
     @Test func privacyJSONReportsTheRulesAndTheStoredMatchCount() async throws {
         let dir = try await seeded()
-        let result = try CLIRunner.run(
+        let result = try await CLIRunner.run(
             ["privacy", "--json"], env: ["OPENRHYME_DATA_DIR": dir.path])
         #expect(result.status == 0, "\(result.stderr)")
         let data = try #require(try CLIRunner.json(result.stdout)["data"] as? [String: Any])
@@ -64,7 +64,7 @@ import Testing
             encoding: .utf8)
         let env = ["OPENRHYME_DATA_DIR": dir.path]
 
-        let jsonResult = try CLIRunner.run(["privacy", "--json"], env: env)
+        let jsonResult = try await CLIRunner.run(["privacy", "--json"], env: env)
         #expect(jsonResult.status == 0, "\(jsonResult.stderr)")
         let data = try #require(try CLIRunner.json(jsonResult.stdout)["data"] as? [String: Any])
         let warnings = try #require(data["config_warnings"] as? [String])
@@ -79,7 +79,7 @@ import Testing
         #expect(
             (data["protected_url_patterns"] as? [String])?.contains("vault.example.com") == false)
 
-        let human = try CLIRunner.run(["privacy"], env: env)
+        let human = try await CLIRunner.run(["privacy"], env: env)
         #expect(human.status == 0, "\(human.stderr)")
         #expect(human.stdout.contains("WARNING: privacy.protected_bundle_ids"))
         #expect(human.stdout.contains("WARNING: privacy.protected_url_patterns"))
@@ -88,18 +88,18 @@ import Testing
 
     @Test func aWellFormedConfigReportsNoWarnings() async throws {
         let dir = try await seeded()
-        let result = try CLIRunner.run(
+        let result = try await CLIRunner.run(
             ["privacy", "--json"], env: ["OPENRHYME_DATA_DIR": dir.path])
         #expect(result.status == 0, "\(result.stderr)")
         let data = try #require(try CLIRunner.json(result.stdout)["data"] as? [String: Any])
         #expect((data["config_warnings"] as? [String])?.isEmpty == true)
-        let human = try CLIRunner.run(["privacy"], env: ["OPENRHYME_DATA_DIR": dir.path])
+        let human = try await CLIRunner.run(["privacy"], env: ["OPENRHYME_DATA_DIR": dir.path])
         #expect(!human.stdout.contains("WARNING:"))
     }
 
     @Test func humanOutputListsCountsAndTheRemovalHintWhenSomethingMatches() async throws {
         let dir = try await seeded()
-        let result = try CLIRunner.run(["privacy"], env: ["OPENRHYME_DATA_DIR": dir.path])
+        let result = try await CLIRunner.run(["privacy"], env: ["OPENRHYME_DATA_DIR": dir.path])
         #expect(result.status == 0, "\(result.stderr)")
         #expect(result.stdout.contains("stored rows a protect rule matches: 1"))
         #expect(
@@ -116,7 +116,7 @@ import Testing
         try await store.append(
             RawEvent(ts: 1, kind: .contextSnapshot, bundleID: "com.example.NotProtected"))
         await store.close()
-        let result = try CLIRunner.run(["privacy"], env: ["OPENRHYME_DATA_DIR": dir.path])
+        let result = try await CLIRunner.run(["privacy"], env: ["OPENRHYME_DATA_DIR": dir.path])
         #expect(result.status == 0, "\(result.stderr)")
         #expect(result.stdout.contains("stored rows a protect rule matches: 0"))
         // The per-match removal sentence is conditional on a nonzero count, in either state...
@@ -146,7 +146,7 @@ import Testing
                 value: "token AKIAQQQQWWWWEEEERRRR end"))
         await store.close()
 
-        let result = try CLIRunner.run(["privacy"], env: ["OPENRHYME_DATA_DIR": dir.path])
+        let result = try await CLIRunner.run(["privacy"], env: ["OPENRHYME_DATA_DIR": dir.path])
         #expect(result.status == 0, "\(result.stderr)")
         #expect(result.stdout.contains("stored rows a protect rule matches: 0"))
         #expect(result.stdout.contains("a rule-match count ONLY"))
@@ -170,7 +170,7 @@ import Testing
                 value: "token AKIAQQQQWWWWEEEERRRR end"))
         await store.close()
 
-        let result = try CLIRunner.run(
+        let result = try await CLIRunner.run(
             ["privacy", "--json"], env: ["OPENRHYME_DATA_DIR": dir.path])
         #expect(result.status == 0, "\(result.stderr)")
         let data = try #require(try CLIRunner.json(result.stdout)["data"] as? [String: Any])
@@ -189,7 +189,7 @@ import Testing
         settings.enabled = false
         try Config(privacy: settings).save(to: dir.appendingPathComponent("config.json"))
 
-        let result = try CLIRunner.run(
+        let result = try await CLIRunner.run(
             ["privacy", "--json"], env: ["OPENRHYME_DATA_DIR": dir.path])
         #expect(result.status == 0, "\(result.stderr)")
         let data = try #require(try CLIRunner.json(result.stdout)["data"] as? [String: Any])
@@ -207,12 +207,12 @@ import Testing
         try Config(privacy: settings).save(to: dir.appendingPathComponent("config.json"))
         let env = ["OPENRHYME_DATA_DIR": dir.path]
 
-        let jsonResult = try CLIRunner.run(["privacy", "--json"], env: env)
+        let jsonResult = try await CLIRunner.run(["privacy", "--json"], env: env)
         #expect(jsonResult.status == 0, "\(jsonResult.stderr)")
         let data = try #require(try CLIRunner.json(jsonResult.stdout)["data"] as? [String: Any])
         #expect(data["enabled"] as? Bool == false)
 
-        let humanResult = try CLIRunner.run(["privacy"], env: env)
+        let humanResult = try await CLIRunner.run(["privacy"], env: env)
         #expect(humanResult.status == 0, "\(humanResult.stderr)")
         // G2: not just a lowercase "disabled" sitting next to otherwise-normal-looking output —
         // must be visually unmistakable and say plainly that the rules below do nothing.
@@ -254,7 +254,7 @@ import Testing
         let dir = try await seededMatchingRowsWithPrivacyDisabled()
         let env = ["OPENRHYME_DATA_DIR": dir.path]
 
-        let jsonResult = try CLIRunner.run(["privacy", "--json"], env: env)
+        let jsonResult = try await CLIRunner.run(["privacy", "--json"], env: env)
         #expect(jsonResult.status == 0, "\(jsonResult.stderr)")
         let data = try #require(try CLIRunner.json(jsonResult.stdout)["data"] as? [String: Any])
         #expect(data["enabled"] as? Bool == false)
@@ -262,7 +262,7 @@ import Testing
         // enabled regardless of the actual (disabled) policy state.
         #expect(data["stored_rows_matching_rules"] as? Int == 2)
 
-        let humanResult = try CLIRunner.run(["privacy"], env: env)
+        let humanResult = try await CLIRunner.run(["privacy"], env: env)
         #expect(humanResult.status == 0, "\(humanResult.stderr)")
         // Labelled plainly as hypothetical, not presented as "stored rows matching current
         // rules" — that phrasing is reserved for when the rules are actually in force.
@@ -277,7 +277,7 @@ import Testing
 
     @Test func disabledStateDoesNotPresentPurgeApplyRulesAsAnActionableStep() async throws {
         let dir = try await seededMatchingRowsWithPrivacyDisabled()
-        let result = try CLIRunner.run(["privacy"], env: ["OPENRHYME_DATA_DIR": dir.path])
+        let result = try await CLIRunner.run(["privacy"], env: ["OPENRHYME_DATA_DIR": dir.path])
         #expect(result.status == 0, "\(result.stderr)")
         // H2: must never read as an instruction to run right now — `purge --apply-rules` would
         // silently match nothing while disabled and report success, leaving every counted row
@@ -291,19 +291,19 @@ import Testing
         #expect(result.stdout.contains("Enable privacy first"))
     }
 
-    @Test func reportsCleanlyWithNoDatabaseAndNeverCreatesOne() throws {
+    @Test func reportsCleanlyWithNoDatabaseAndNeverCreatesOne() async throws {
         let dir = try CLIRunner.tempDataDir()
         let env = ["OPENRHYME_DATA_DIR": dir.path]
         let dbURL = dir.appendingPathComponent("events.sqlite")
         #expect(!FileManager.default.fileExists(atPath: dbURL.path))
 
-        let result = try CLIRunner.run(["privacy", "--json"], env: env)
+        let result = try await CLIRunner.run(["privacy", "--json"], env: env)
         #expect(result.status == 0, "\(result.stderr)")
         let data = try #require(try CLIRunner.json(result.stdout)["data"] as? [String: Any])
         #expect(data["stored_rows_matching_rules"] as? Int == 0)
         #expect(!FileManager.default.fileExists(atPath: dbURL.path))
 
-        let humanResult = try CLIRunner.run(["privacy"], env: env)
+        let humanResult = try await CLIRunner.run(["privacy"], env: env)
         #expect(humanResult.status == 0, "\(humanResult.stderr)")
         #expect(!FileManager.default.fileExists(atPath: dbURL.path))
     }
@@ -318,7 +318,7 @@ import Testing
         await store.close()
 
         let before = try Data(contentsOf: dbURL)
-        let result = try CLIRunner.run(
+        let result = try await CLIRunner.run(
             ["privacy", "--json"], env: ["OPENRHYME_DATA_DIR": dir.path])
         #expect(result.status == 0, "\(result.stderr)")
         let after = try Data(contentsOf: dbURL)
@@ -332,11 +332,11 @@ import Testing
         settings.retentionDays = 7
         try Config(capture: settings).save(to: dir.appendingPathComponent("config.json"))
 
-        let result = try CLIRunner.run(["privacy"], env: ["OPENRHYME_DATA_DIR": dir.path])
+        let result = try await CLIRunner.run(["privacy"], env: ["OPENRHYME_DATA_DIR": dir.path])
         #expect(result.status == 0, "\(result.stderr)")
         #expect(result.stdout.contains("retention: 7 day(s)"))
 
-        let json = try CLIRunner.run(
+        let json = try await CLIRunner.run(
             ["privacy", "--json"], env: ["OPENRHYME_DATA_DIR": dir.path])
         let data = try #require(try CLIRunner.json(json.stdout)["data"] as? [String: Any])
         #expect(data["retention_days"] as? Int == 7)

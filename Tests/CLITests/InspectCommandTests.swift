@@ -6,8 +6,8 @@ import Testing
 @testable import openrhyme
 
 @Suite struct InspectCommandTests {
-    @Test func inspectEitherReportsContextOrNotTrusted() throws {
-        let result = try CLIRunner.run(
+    @Test func inspectEitherReportsContextOrNotTrusted() async throws {
+        let result = try await CLIRunner.run(
             ["inspect", "--json", "--depth", "1"], env: try CLIRunner.tempEnv())
         let envelope = try CLIRunner.json(result.stdout)
         if result.status == 3 {
@@ -21,8 +21,8 @@ import Testing
         }
     }
 
-    @Test func inspectRejectsNegativeDepth() throws {
-        let result = try CLIRunner.run(
+    @Test func inspectRejectsNegativeDepth() async throws {
+        let result = try await CLIRunner.run(
             ["inspect", "--depth", "-1", "--json"], env: try CLIRunner.tempEnv())
         #expect(result.status == 2 || result.status == 64)  // ArgumentParser uses EX_USAGE
     }
@@ -152,7 +152,7 @@ import Testing
 @Suite(.enabled(if: ProcessInfo.processInfo.environment["OPENRHYME_LIVE_AX"] == "1"))
 @MainActor struct InspectPrivacyLiveTests {
     @Test func plainInspectLeaksNothingForAProtectedContextAndIgnorePrivacyIsTheOnlyBypass()
-        throws
+        async throws
     {
         let client = AXClient()
         #expect(client.isTrusted(prompt: false), "grant Accessibility to the terminal first")
@@ -166,7 +166,7 @@ import Testing
         let env = ["OPENRHYME_DATA_DIR": dir.path]
 
         // Plain `inspect`: must protect the context and print/emit nothing else.
-        let plain = try CLIRunner.run(["inspect", "--json"], env: env)
+        let plain = try await CLIRunner.run(["inspect", "--json"], env: env)
         #expect(plain.status == 0, "\(plain.stderr)")
         #expect(plain.stderr.isEmpty)
         let plainData = try #require(try CLIRunner.json(plain.stdout)["data"] as? [String: Any])
@@ -176,7 +176,7 @@ import Testing
         #expect(plainData["tree"] == nil || plainData["tree"] is NSNull)
         #expect((plainData["attribute_names"] as? [String])?.isEmpty == true)
 
-        let plainHuman = try CLIRunner.run(["inspect"], env: env)
+        let plainHuman = try await CLIRunner.run(["inspect"], env: env)
         #expect(plainHuman.status == 0, "\(plainHuman.stderr)")
         #expect(
             plainHuman.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -186,7 +186,7 @@ import Testing
         }
 
         // `--ignore-privacy` is the only way to see through it, and it must warn on stderr.
-        let bypass = try CLIRunner.run(["inspect", "--ignore-privacy", "--json"], env: env)
+        let bypass = try await CLIRunner.run(["inspect", "--ignore-privacy", "--json"], env: env)
         #expect(bypass.status == 0, "\(bypass.stderr)")
         #expect(
             bypass.stderr.contains(

@@ -5,9 +5,10 @@ import Testing
 @testable import Store
 
 @Suite struct StatusCommandTests {
-    @Test func reportsEmptyStateWithoutDatabase() throws {
+    @Test func reportsEmptyStateWithoutDatabase() async throws {
         let dir = try CLIRunner.tempDataDir()
-        let result = try CLIRunner.run(["status", "--json"], env: ["OPENRHYME_DATA_DIR": dir.path])
+        let result = try await CLIRunner.run(
+            ["status", "--json"], env: ["OPENRHYME_DATA_DIR": dir.path])
         #expect(result.status == 0, "\(result.stderr)")
         let data = try CLIRunner.json(result.stdout)["data"] as? [String: Any]
         #expect(data?["daemon_running"] as? Bool == false)
@@ -33,7 +34,8 @@ import Testing
         try Config(allowlist: ["com.a"], capture: settings).save(
             to: dir.appendingPathComponent("config.json"))
 
-        let result = try CLIRunner.run(["status", "--json"], env: ["OPENRHYME_DATA_DIR": dir.path])
+        let result = try await CLIRunner.run(
+            ["status", "--json"], env: ["OPENRHYME_DATA_DIR": dir.path])
         #expect(result.status == 0, "\(result.stderr)")
         let data = try CLIRunner.json(result.stdout)["data"] as? [String: Any]
         #expect(data?["daemon_running"] as? Bool == true)
@@ -44,7 +46,7 @@ import Testing
         // Privacy fix round 1: `retention_days` was reported by no command before this.
         #expect(data?["retention_days"] as? Int == 14)
 
-        let human = try CLIRunner.run(["status"], env: ["OPENRHYME_DATA_DIR": dir.path])
+        let human = try await CLIRunner.run(["status"], env: ["OPENRHYME_DATA_DIR": dir.path])
         #expect(human.stdout.contains("daemon:   running"))
         #expect(human.stdout.contains("retention: 14 day(s)"))
     }

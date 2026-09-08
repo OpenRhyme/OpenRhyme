@@ -2,8 +2,8 @@ import Foundation
 import Testing
 
 @Suite struct VersionCommandTests {
-    @Test func versionJSONEnvelope() throws {
-        let result = try CLIRunner.run(["version", "--json"], env: try CLIRunner.tempEnv())
+    @Test func versionJSONEnvelope() async throws {
+        let result = try await CLIRunner.run(["version", "--json"], env: try CLIRunner.tempEnv())
         #expect(result.status == 0, "\(result.stderr)")
         let envelope = try CLIRunner.json(result.stdout)
         #expect(envelope["ok"] as? Bool == true)
@@ -13,19 +13,19 @@ import Testing
         #expect(result.stdout.filter { $0 == "\n" }.count == 1, "exactly one line")
     }
 
-    @Test func versionHumanOutput() throws {
-        let result = try CLIRunner.run(["version"], env: try CLIRunner.tempEnv())
+    @Test func versionHumanOutput() async throws {
+        let result = try await CLIRunner.run(["version"], env: try CLIRunner.tempEnv())
         #expect(result.status == 0)
         #expect(result.stdout == "openrhyme 0.1.0 (schema 1)\n")
     }
 
-    @Test func unknownCommandExitsWithUsageCode() throws {
-        let result = try CLIRunner.run(["bogus"], env: try CLIRunner.tempEnv())
+    @Test func unknownCommandExitsWithUsageCode() async throws {
+        let result = try await CLIRunner.run(["bogus"], env: try CLIRunner.tempEnv())
         #expect(result.status == 2)
     }
 
-    @Test func helpExitsZeroWithUsageText() throws {
-        let result = try CLIRunner.run(["--help"], env: try CLIRunner.tempEnv())
+    @Test func helpExitsZeroWithUsageText() async throws {
+        let result = try await CLIRunner.run(["--help"], env: try CLIRunner.tempEnv())
         #expect(result.status == 0)
         #expect(result.stdout.contains("USAGE") || result.stdout.contains("OVERVIEW"))
     }

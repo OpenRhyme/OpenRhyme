@@ -2,11 +2,11 @@ import Foundation
 import Testing
 
 @Suite struct AppsRunningTests {
-    @Test func listsRunningAppsWithFlags() throws {
+    @Test func listsRunningAppsWithFlags() async throws {
         let dir = try CLIRunner.tempDataDir()
         let env = ["OPENRHYME_DATA_DIR": dir.path]
-        _ = try CLIRunner.run(["apps", "allow", "com.apple.finder"], env: env)
-        let result = try CLIRunner.run(["apps", "running", "--json"], env: env)
+        _ = try await CLIRunner.run(["apps", "allow", "com.apple.finder"], env: env)
+        let result = try await CLIRunner.run(["apps", "running", "--json"], env: env)
         #expect(result.status == 0, "\(result.stderr)")
         let apps =
             (try CLIRunner.json(result.stdout)["data"] as? [String: Any])?["apps"]

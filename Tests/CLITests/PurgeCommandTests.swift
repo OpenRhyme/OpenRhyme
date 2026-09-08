@@ -427,7 +427,7 @@ import Testing
     {
         let (dir, env) = try await seeded()
 
-        let dry = try CLIRunner.run(
+        let dry = try await CLIRunner.run(
             ["purge", "--since", "0", "--app", "com.apple.Safari", "--dry-run", "--json"],
             env: env)
         #expect(dry.status == 0, "\(dry.stderr)")
@@ -441,7 +441,7 @@ import Testing
         #expect(try await store.count() == 2)
         await store.close()
 
-        let refused = try CLIRunner.run(
+        let refused = try await CLIRunner.run(
             ["purge", "--since", "0", "--app", "com.apple.Safari", "--json"], env: env)
         #expect(refused.status == 2)
         let error = try CLIRunner.json(refused.stdout)["error"] as? [String: Any]
@@ -451,7 +451,7 @@ import Testing
         #expect(try await stillThere.count() == 2)
         await stillThere.close()
 
-        let confirmed = try CLIRunner.run(
+        let confirmed = try await CLIRunner.run(
             ["purge", "--since", "0", "--app", "com.apple.Safari", "--yes", "--json"], env: env)
         #expect(confirmed.status == 0, "\(confirmed.stderr)")
         data = try CLIRunner.json(confirmed.stdout)["data"] as? [String: Any]
@@ -484,7 +484,7 @@ import Testing
         try Config(privacy: settings).save(to: dir.appendingPathComponent("config.json"))
         let env = ["OPENRHYME_DATA_DIR": dir.path]
 
-        let result = try CLIRunner.run(
+        let result = try await CLIRunner.run(
             ["purge", "--since", "0", "--apply-rules", "--yes", "--json"], env: env)
         // Not an error: nothing failed, the selection is honestly empty given the policy is
         // off — the exit code and JSON shape are unchanged, only stderr gains a warning.
@@ -512,7 +512,7 @@ import Testing
         await store.close()
         let env = ["OPENRHYME_DATA_DIR": dir.path]
 
-        let result = try CLIRunner.run(
+        let result = try await CLIRunner.run(
             ["purge", "--since", "0", "--apply-rules", "--dry-run", "--json"], env: env)
         #expect(result.status == 0, "\(result.stderr)")
         #expect(!result.stderr.contains("privacy is disabled"))
@@ -535,7 +535,7 @@ import Testing
         await store.close()
         let env = ["OPENRHYME_DATA_DIR": dir.path]
 
-        let human = try CLIRunner.run(
+        let human = try await CLIRunner.run(
             ["purge", "--since", "0", "--apply-rules", "--dry-run"], env: env)
         #expect(human.status == 0, "\(human.stderr)")
         #expect(human.stdout.contains("0 row(s) would be deleted"))
@@ -543,7 +543,7 @@ import Testing
         #expect(human.stdout.contains("even if it contains a secret"))
         #expect(human.stdout.contains("openrhyme events --since 7d --ignore-privacy"))
 
-        let json = try CLIRunner.run(
+        let json = try await CLIRunner.run(
             ["purge", "--since", "0", "--apply-rules", "--dry-run", "--json"], env: env)
         #expect(json.status == 0, "\(json.stderr)")
         let data = try #require(try CLIRunner.json(json.stdout)["data"] as? [String: Any])
@@ -554,13 +554,13 @@ import Testing
 
         // A purge that is not rule-based makes no such claim, so it carries no such caveat —
         // the existing `--json` shape is unchanged for every other selection.
-        let byTime = try CLIRunner.run(
+        let byTime = try await CLIRunner.run(
             ["purge", "--since", "0", "--all", "--dry-run", "--json"], env: env)
         #expect(byTime.status == 0, "\(byTime.stderr)")
         let plain = try #require(try CLIRunner.json(byTime.stdout)["data"] as? [String: Any])
         #expect(plain["matched"] as? Int == 1)
         #expect(plain["rule_match_caveat"] == nil)
-        let plainHuman = try CLIRunner.run(
+        let plainHuman = try await CLIRunner.run(
             ["purge", "--since", "0", "--all", "--dry-run"], env: env)
         #expect(plainHuman.stdout.contains("1 row(s) would be deleted"))
         #expect(!plainHuman.stdout.contains("protect rule"))
@@ -577,7 +577,7 @@ import Testing
                 value: "token AKIAQQQQWWWWEEEERRRR end"))
         await store.close()
 
-        let result = try CLIRunner.run(
+        let result = try await CLIRunner.run(
             ["purge", "--since", "0", "--apply-rules", "--yes"],
             env: ["OPENRHYME_DATA_DIR": dir.path])
         #expect(result.status == 0, "\(result.stderr)")
@@ -586,7 +586,7 @@ import Testing
 
         // And the confirmation refusal — `purge --apply-rules` with no other flag, the first
         // place most people meet the count at all — carries it too.
-        let refused = try CLIRunner.run(
+        let refused = try await CLIRunner.run(
             ["purge", "--since", "0", "--apply-rules", "--json"],
             env: ["OPENRHYME_DATA_DIR": dir.path])
         #expect(refused.status == 2)
@@ -599,7 +599,7 @@ import Testing
 
     @Test func noFiltersAndNoAllIsAUsageErrorNotAnImplicitPurgeEverything() async throws {
         let (_, env) = try await seeded()
-        let result = try CLIRunner.run(["purge", "--yes", "--json"], env: env)
+        let result = try await CLIRunner.run(["purge", "--yes", "--json"], env: env)
         #expect(result.status == 2)
         let error = try CLIRunner.json(result.stdout)["error"] as? [String: Any]
         #expect(error?["code"] as? String == "usage")
@@ -609,7 +609,7 @@ import Testing
     /// but only checked `since` — `--until` alone was wrongly refused as if no filter was given.
     @Test func untilAloneIsAcceptedNotRefusedAsMissingFilters() async throws {
         let (_, env) = try await seeded()
-        let result = try CLIRunner.run(
+        let result = try await CLIRunner.run(
             ["purge", "--until", "9999999999", "--dry-run", "--json"], env: env)
         #expect(result.status == 0, "\(result.stderr)")
         let data = try CLIRunner.json(result.stdout)["data"] as? [String: Any]
@@ -624,7 +624,7 @@ import Testing
         let dbURL = dir.appendingPathComponent("events.sqlite")
         #expect(!FileManager.default.fileExists(atPath: dbURL.path))
 
-        let result = try CLIRunner.run(
+        let result = try await CLIRunner.run(
             ["purge", "--since", "0", "--all", "--dry-run", "--json"],
             env: ["OPENRHYME_DATA_DIR": dir.path])
         // A read-only operation against a store that doesn't exist yet is a stable error,
@@ -640,7 +640,7 @@ import Testing
 
     @Test func allDeletesEverythingInRange() async throws {
         let (dir, env) = try await seeded()
-        let result = try CLIRunner.run(
+        let result = try await CLIRunner.run(
             ["purge", "--since", "0", "--all", "--yes", "--json"], env: env)
         #expect(result.status == 0, "\(result.stderr)")
         let data = try CLIRunner.json(result.stdout)["data"] as? [String: Any]
@@ -671,7 +671,7 @@ import Testing
         }
 
         let before = snapshot()
-        let result = try CLIRunner.run(
+        let result = try await CLIRunner.run(
             ["purge", "--app", "com.nonexistent.example", "--yes", "--json"], env: env)
         #expect(result.status == 0, "\(result.stderr)")
         let envelope = try CLIRunner.json(result.stdout)
@@ -702,7 +702,7 @@ import Testing
         }
 
         let before = try checkpointedBytes()
-        let result = try CLIRunner.run(
+        let result = try await CLIRunner.run(
             ["purge", "--since", "0", "--all", "--dry-run", "--json"], env: env)
         #expect(result.status == 0, "\(result.stderr)")
         let data = try CLIRunner.json(result.stdout)["data"] as? [String: Any]
@@ -728,7 +728,7 @@ import Testing
             locker.close()
         }
 
-        let result = try CLIRunner.run(
+        let result = try await CLIRunner.run(
             ["purge", "--since", "0", "--all", "--yes", "--json"], env: env)
         #expect(result.status != 0)
         let envelope = try CLIRunner.json(result.stdout)
@@ -778,7 +778,7 @@ import Testing
         let holder = try Database(url: dbURL, mode: .readWrite)
         defer { holder.close() }
 
-        let result = try CLIRunner.run(
+        let result = try await CLIRunner.run(
             ["purge", "--since", "0", "--all", "--yes", "--json"],
             env: ["OPENRHYME_DATA_DIR": dir.path])
         #expect(result.status == 0, "\(result.stderr)")
@@ -811,7 +811,7 @@ import Testing
             holder.close()
         }
 
-        let result = try CLIRunner.run(
+        let result = try await CLIRunner.run(
             ["purge", "--since", "0", "--all", "--yes", "--json"], env: env)
         #expect(result.status != 0)
         let envelope = try CLIRunner.json(result.stdout)
@@ -851,39 +851,26 @@ import Testing
         return false
     }
 
-    /// Never calls `Process.waitUntilExit()`. Foundation implements it by spinning the *calling*
-    /// thread's run loop waiting for a source registered on whichever thread called `run()`; a
-    /// Swift Testing body resumes on an arbitrary cooperative-pool thread after every `await`,
-    /// so launching and stopping from two different threads deadlocks the whole test process
-    /// indefinitely. Reproduced on an unmodified checkout of this suite; polling `isRunning`,
-    /// which the loop below already does, gives the same guarantee without the run loop —
-    /// `isRunning == false` means terminated and reaped, so `terminationStatus` is valid after.
-    @discardableResult
-    private func stopDaemon(_ process: Process, timeout: TimeInterval = 10) -> Bool {
-        guard process.isRunning else { return true }
+    /// A leak guard for `defer`, which cannot `await`: signals the daemon and returns at once.
+    /// This test only needs the subprocess gone, never a clean-exit assertion, so nothing here
+    /// has to wait for it — and waiting is exactly what must not happen on a cooperative-pool
+    /// thread (see `CLIRunner.run` for why). Never calls `Process.waitUntilExit()` either:
+    /// Foundation implements it by spinning the *calling* thread's run loop waiting for a source
+    /// registered on whichever thread called `run()`, and a Swift Testing body resumes on an
+    /// arbitrary cooperative-pool thread after every `await`, so launching and stopping from two
+    /// different threads deadlocks the whole test process indefinitely.
+    private func terminateDaemon(_ process: Process) {
+        guard process.isRunning else { return }
         process.terminate()
-        let deadline = Date().addingTimeInterval(timeout)
-        while process.isRunning && Date() < deadline {
-            usleep(20_000)
-        }
-        guard !process.isRunning else {
-            kill(process.processIdentifier, SIGKILL)
-            let killDeadline = Date().addingTimeInterval(timeout)
-            while process.isRunning && Date() < killDeadline {
-                usleep(20_000)
-            }
-            return false
-        }
-        return true
     }
 
     @Test func warnsAboutALiveDaemonButStillPurges() async throws {
         let dir = try CLIRunner.tempDataDir()
         let daemon = try launchDaemon(dataDir: dir)
-        defer { stopDaemon(daemon) }
+        defer { terminateDaemon(daemon) }
         #expect(await waitForPIDFile(dir), "daemon did not write daemon.pid")
 
-        let result = try CLIRunner.run(
+        let result = try await CLIRunner.run(
             ["purge", "--since", "0", "--all", "--yes", "--json"],
             env: ["OPENRHYME_DATA_DIR": dir.path])
         #expect(result.status == 0, "\(result.stderr)")
