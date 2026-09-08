@@ -22,7 +22,7 @@ import Testing
 
     @Test func eventsFiltersAndWrapsInEnvelope() async throws {
         let env = try await seeded()
-        let result = try CLIRunner.run(["events", "--since", "1h", "--json"], env: env)
+        let result = try await CLIRunner.run(["events", "--since", "1h", "--json"], env: env)
         #expect(result.status == 0, "\(result.stderr)")
         let envelope = try CLIRunner.json(result.stdout)
         let data = envelope["data"] as? [String: Any]
@@ -32,11 +32,11 @@ import Testing
         #expect(events?.first?["window_title"] as? String == "T")
         #expect((events?.first?["extra"] as? [String: Any])?["reason"] as? String == "heartbeat")
 
-        let byApp = try CLIRunner.run(
+        let byApp = try await CLIRunner.run(
             ["events", "--since", "1d", "--app", "com.b", "--json"], env: env)
         #expect((try CLIRunner.json(byApp.stdout)["data"] as? [String: Any])?["count"] as? Int == 1)
 
-        let byKind = try CLIRunner.run(
+        let byKind = try await CLIRunner.run(
             [
                 "events", "--since", "1d", "--kind", "app.activated", "--kind", "element.focused",
                 "--limit", "1", "--json",
@@ -47,7 +47,7 @@ import Testing
 
     @Test func eventsHumanOutputIsOneLinePerEvent() async throws {
         let env = try await seeded()
-        let result = try CLIRunner.run(["events", "--since", "1d"], env: env)
+        let result = try await CLIRunner.run(["events", "--since", "1d"], env: env)
         #expect(result.status == 0)
         #expect(result.stdout.split(separator: "\n").count == 3)
         #expect(result.stdout.contains("window.focused"))
@@ -55,7 +55,7 @@ import Testing
 
     @Test func exportWritesJSONLToStdoutAndFile() async throws {
         let env = try await seeded()
-        let result = try CLIRunner.run(["export", "--since", "1d"], env: env)
+        let result = try await CLIRunner.run(["export", "--since", "1d"], env: env)
         #expect(result.status == 0, "\(result.stderr)")
         let lines = result.stdout.split(separator: "\n")
         #expect(lines.count == 3)
@@ -66,7 +66,7 @@ import Testing
         #expect(secondLine.contains(#""extra":{"reason":"heartbeat"}"#))
 
         let out = try CLIRunner.tempDataDir().appendingPathComponent("day.jsonl")
-        let toFile = try CLIRunner.run(
+        let toFile = try await CLIRunner.run(
             ["export", "--since", "1d", "--out", out.path], env: env)
         #expect(toFile.status == 0)
         #expect(toFile.stdout.isEmpty)
@@ -81,7 +81,7 @@ import Testing
         let dir = try CLIRunner.tempDataDir()
 
         let fresh = dir.appendingPathComponent("fresh.jsonl")
-        let result = try CLIRunner.run(
+        let result = try await CLIRunner.run(
             ["export", "--since", "1d", "--out", fresh.path], env: env)
         #expect(result.status == 0, "\(result.stderr)")
         var mode =
@@ -93,7 +93,7 @@ import Testing
         FileManager.default.createFile(
             atPath: existing.path, contents: Data("stale\n".utf8),
             attributes: [.posixPermissions: NSNumber(value: Int16(0o644))])
-        let overwrite = try CLIRunner.run(
+        let overwrite = try await CLIRunner.run(
             ["export", "--since", "1d", "--out", existing.path], env: env)
         #expect(overwrite.status == 0, "\(overwrite.stderr)")
         mode =
@@ -117,7 +117,7 @@ import Testing
         await store.close()
         let env = ["OPENRHYME_DATA_DIR": dir.path]
 
-        let result = try CLIRunner.run(["export", "--since", "1d"], env: env)
+        let result = try await CLIRunner.run(["export", "--since", "1d"], env: env)
         #expect(result.status == 0, "\(result.stderr)")
         let lines = result.stdout.split(separator: "\n")
         #expect(lines.count == 3)
@@ -129,17 +129,17 @@ import Testing
         #expect(ids == [1, 2, 3])
     }
 
-    @Test func missingDatabaseIsAStableError() throws {
+    @Test func missingDatabaseIsAStableError() async throws {
         let env = ["OPENRHYME_DATA_DIR": try CLIRunner.tempDataDir().path]
-        let result = try CLIRunner.run(["events", "--since", "1h", "--json"], env: env)
+        let result = try await CLIRunner.run(["events", "--since", "1h", "--json"], env: env)
         #expect(result.status == 1)
         let envelope = try CLIRunner.json(result.stdout)
         #expect(envelope["ok"] as? Bool == false)
         #expect((envelope["error"] as? [String: Any])?["code"] as? String == "db_not_found")
     }
 
-    @Test func badTimeIsAUsageError() throws {
-        let result = try CLIRunner.run(
+    @Test func badTimeIsAUsageError() async throws {
+        let result = try await CLIRunner.run(
             ["events", "--since", "yesterday", "--json"], env: try CLIRunner.tempEnv())
         #expect(result.status == 2)
         #expect(
@@ -162,7 +162,7 @@ import Testing
         await store.close()
         let env = ["OPENRHYME_DATA_DIR": dir.path]
 
-        let result = try CLIRunner.run(["events", "--since", "0", "--json"], env: env)
+        let result = try await CLIRunner.run(["events", "--since", "0", "--json"], env: env)
         #expect(result.status == 0, "\(result.stderr)")
         let data = try CLIRunner.json(result.stdout)["data"] as? [String: Any]
         let rows = try #require(data?["events"] as? [[String: Any]])
@@ -182,7 +182,7 @@ import Testing
         try Config(privacy: settings).save(to: dir.appendingPathComponent("config.json"))
         let env = ["OPENRHYME_DATA_DIR": dir.path]
 
-        let result = try CLIRunner.run(["events", "--since", "0", "--json"], env: env)
+        let result = try await CLIRunner.run(["events", "--since", "0", "--json"], env: env)
         #expect(result.status == 0, "\(result.stderr)")
         let rows = try #require(
             (try CLIRunner.json(result.stdout)["data"] as? [String: Any])?["events"]
@@ -214,12 +214,12 @@ import Testing
     @Test func eventsIgnorePrivacyReturnsStoredTextUnredactedAndWarnsOnStderr() async throws {
         let (env, secret) = try await seededWithARawSecret()
 
-        let redacted = try CLIRunner.run(["events", "--since", "0", "--json"], env: env)
+        let redacted = try await CLIRunner.run(["events", "--since", "0", "--json"], env: env)
         #expect(redacted.status == 0, "\(redacted.stderr)")
         #expect(!redacted.stdout.contains(secret))
         #expect(redacted.stderr.isEmpty)
 
-        let raw = try CLIRunner.run(
+        let raw = try await CLIRunner.run(
             ["events", "--since", "0", "--json", "--ignore-privacy"], env: env)
         #expect(raw.status == 0, "\(raw.stderr)")
         let rows = try #require(
@@ -239,11 +239,11 @@ import Testing
     @Test func exportIgnorePrivacyReturnsStoredTextUnredactedAndWarnsOnStderr() async throws {
         let (env, secret) = try await seededWithARawSecret()
 
-        let redacted = try CLIRunner.run(["export", "--since", "0"], env: env)
+        let redacted = try await CLIRunner.run(["export", "--since", "0"], env: env)
         #expect(redacted.status == 0, "\(redacted.stderr)")
         #expect(!redacted.stdout.contains(secret))
 
-        let raw = try CLIRunner.run(["export", "--since", "0", "--ignore-privacy"], env: env)
+        let raw = try await CLIRunner.run(["export", "--since", "0", "--ignore-privacy"], env: env)
         #expect(raw.status == 0, "\(raw.stderr)")
         #expect(raw.stdout.contains(secret))
         #expect(
@@ -284,7 +284,7 @@ import Testing
         let env = ["OPENRHYME_DATA_DIR": dir.path]
 
         // Exactly the command `openrhyme privacy` recommends: human output, no --json.
-        let raw = try CLIRunner.run(["events", "--since", "0", "--ignore-privacy"], env: env)
+        let raw = try await CLIRunner.run(["events", "--since", "0", "--ignore-privacy"], env: env)
         #expect(raw.status == 0, "\(raw.stderr)")
         #expect(raw.stderr.contains("any secret in the store is printed in the clear"))
         #expect(
@@ -304,7 +304,7 @@ import Testing
         #expect(raw.stdout.contains("context.snapshot  com.apple.Safari  Quarterly report"))
 
         // Without the flag nothing changes: still redacted, still one line per event.
-        let redacted = try CLIRunner.run(["events", "--since", "0"], env: env)
+        let redacted = try await CLIRunner.run(["events", "--since", "0"], env: env)
         #expect(redacted.status == 0, "\(redacted.stderr)")
         #expect(!redacted.stdout.contains(secret))
         #expect(redacted.stdout.split(separator: "\n").count == 1)
@@ -321,7 +321,7 @@ import Testing
         await store.close()
         let env = ["OPENRHYME_DATA_DIR": dir.path]
 
-        let capped = try CLIRunner.run(
+        let capped = try await CLIRunner.run(
             ["events", "--since", "0", "--max-value-chars", "10", "--json"], env: env)
         #expect(capped.status == 0, "\(capped.stderr)")
         let cappedRows = try #require(
@@ -329,7 +329,7 @@ import Testing
                 as? [[String: Any]])
         #expect((cappedRows.first?["value"] as? String)?.count == 10)
 
-        let full = try CLIRunner.run(
+        let full = try await CLIRunner.run(
             ["events", "--since", "0", "--max-value-chars", "0", "--json"], env: env)
         #expect(full.status == 0, "\(full.stderr)")
         let fullRows = try #require(
@@ -350,7 +350,7 @@ import Testing
         await store.close()
         let env = ["OPENRHYME_DATA_DIR": dir.path]
 
-        let result = try CLIRunner.run(["export", "--since", "0"], env: env)
+        let result = try await CLIRunner.run(["export", "--since", "0"], env: env)
         #expect(result.status == 0, "\(result.stderr)")
         #expect(result.stdout.contains(#""value":"token [redacted:aws-key] end""#))
         #expect(!result.stdout.contains("AKIAQQQQWWWWEEEERRRR"))
@@ -373,7 +373,7 @@ import Testing
         await store.close()
         let env = ["OPENRHYME_DATA_DIR": dir.path]
 
-        let result = try CLIRunner.run(["events", "--since", "0", "--json"], env: env)
+        let result = try await CLIRunner.run(["events", "--since", "0", "--json"], env: env)
         #expect(result.status == 0, "\(result.stderr)")
         let rows = try #require(
             (try CLIRunner.json(result.stdout)["data"] as? [String: Any])?["events"]
@@ -399,7 +399,7 @@ import Testing
         await store.close()
         let env = ["OPENRHYME_DATA_DIR": dir.path]
 
-        let result = try CLIRunner.run(["events", "--since", "0", "--json"], env: env)
+        let result = try await CLIRunner.run(["events", "--since", "0", "--json"], env: env)
         #expect(result.status == 0, "\(result.stderr)")
         let rows = try #require(
             (try CLIRunner.json(result.stdout)["data"] as? [String: Any])?["events"]
@@ -441,7 +441,7 @@ import Testing
         await store.close()
         let env = ["OPENRHYME_DATA_DIR": dir.path]
 
-        let eventsResult = try CLIRunner.run(["events", "--since", "0", "--json"], env: env)
+        let eventsResult = try await CLIRunner.run(["events", "--since", "0", "--json"], env: env)
         #expect(eventsResult.status == 0, "\(eventsResult.stderr)")
         let eventsRows = try #require(
             (try CLIRunner.json(eventsResult.stdout)["data"] as? [String: Any])?["events"]
@@ -451,7 +451,7 @@ import Testing
         #expect(eventsExtra["fingerprint"] as? String == "abc123")
         #expect(eventsExtra["valueHash"] as? String == "def456")
 
-        let exportResult = try CLIRunner.run(["export", "--since", "0"], env: env)
+        let exportResult = try await CLIRunner.run(["export", "--since", "0"], env: env)
         #expect(exportResult.status == 0, "\(exportResult.stderr)")
         #expect(
             exportResult.stdout.contains(#""previousTitle":"prev title [redacted:aws-key]""#))
@@ -466,7 +466,7 @@ import Testing
     @Test func eventsWithACorruptConfigFailsClosedWithAMappedError() async throws {
         let dir = try CLIRunner.tempDataDir()
         try Data("{not valid json".utf8).write(to: dir.appendingPathComponent("config.json"))
-        let result = try CLIRunner.run(
+        let result = try await CLIRunner.run(
             ["events", "--since", "0", "--json"], env: ["OPENRHYME_DATA_DIR": dir.path])
         #expect(result.status != 0)
         let error = try #require(
@@ -478,7 +478,7 @@ import Testing
     @Test func exportWithACorruptConfigFailsClosedWithAMappedError() async throws {
         let dir = try CLIRunner.tempDataDir()
         try Data("{not valid json".utf8).write(to: dir.appendingPathComponent("config.json"))
-        let result = try CLIRunner.run(
+        let result = try await CLIRunner.run(
             ["export", "--since", "0"], env: ["OPENRHYME_DATA_DIR": dir.path])
         #expect(result.status != 0)
         #expect(
@@ -503,7 +503,7 @@ import Testing
                 value: String(repeating: "x", count: 50)))
         await store.close()
 
-        let result = try CLIRunner.run(
+        let result = try await CLIRunner.run(
             ["events", "--since", "0", "--max-value-chars=-1", "--json"],
             env: ["OPENRHYME_DATA_DIR": dir.path])
         #expect(result.status == 2 || result.status == 64)  // ArgumentParser uses EX_USAGE
@@ -530,7 +530,7 @@ import Testing
         await store.close()
         let env = ["OPENRHYME_DATA_DIR": dir.path]
 
-        let result = try CLIRunner.run(
+        let result = try await CLIRunner.run(
             ["events", "--since", "0", "--max-value-chars", "10", "--json"], env: env)
         #expect(result.status == 0, "\(result.stderr)")
         let rows = try #require(
@@ -553,7 +553,7 @@ import Testing
         await store.close()
         let env = ["OPENRHYME_DATA_DIR": dir.path]
 
-        let result = try CLIRunner.run(
+        let result = try await CLIRunner.run(
             ["events", "--since", "0", "--max-value-chars", "0", "--json"], env: env)
         #expect(result.status == 0, "\(result.stderr)")
         let rows = try #require(

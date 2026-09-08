@@ -6,7 +6,7 @@ Status: research notes, 2026-09-01. Nothing here is implemented. This answers tw
 
 | Process | Lifetime | Who starts it | Needs TCC grants? | Role |
 |---|---|---|---|---|
-| `openrhyme daemon` | always-on | `launchd` user agent (or the user, during dev) | **yes** — Accessibility + Input Monitoring | capture → HOT tier; runs `Compact` on a schedule |
+| `openrhyme daemon` | always-on | `launchd` user agent (or the user, during dev) | **yes** — Accessibility + Input Monitoring | capture → `events.sqlite`; retention sweep on a schedule |
 | `openrhyme <subcommand> --json` | one shot | anyone (the MCP server, a shell, a cron) | no (talks to the daemon's data, not to apps) | control + inspection |
 | `openrhyme-mcp` (Python) | per agent session | the agent host (Claude Desktop, Claude Code, …) over **stdio** | no | exposes tools/resources to the agent |
 
